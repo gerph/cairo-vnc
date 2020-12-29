@@ -6,6 +6,9 @@ import time
 
 import cairo
 
+from .constants import VNCConstants
+from .errors import CairoVNCBadSurfaceFormatError
+
 
 class SurfaceData(object):
     """
