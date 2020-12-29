@@ -89,6 +89,9 @@ class CommStream(object):
         self.datalen = 0
         self.fionread_data = array.array('i', [0])
 
+    def log(self, message):
+        print("Comm: {}".format(message))
+
     def readdata(self, nbytes):
         """
         Read data from the socket - may be overridden to decrypt the data from the wire
@@ -99,7 +102,7 @@ class CommStream(object):
         """
         Write data to the socket - may be overridden to encrypt the data on the wire
         """
-        print("Sending %r" % (data,))
+        self.log("Sending %r" % (data,))
         self.sock.send(data)
 
     def fionread(self):
@@ -187,7 +190,7 @@ class CommStream(object):
                 break
 
             # Put more data into the buffer
-            print("Awaiting %i bytes (got %r, buffered %r, datalen %r)" % (size, data, self.data, self.datalen))
+            self.log("Awaiting %i bytes (got %r, buffered %r, datalen %r)" % (size, data, self.data, self.datalen))
             (rlist, wlist, xlist) = select.select([self.sock], [], [], timeout)
             if rlist:
                 nbytes = self.fionread()
@@ -195,7 +198,7 @@ class CommStream(object):
                     # Connection was closed
                     self.closed = True
                     break
-                print("Reading %i bytes" % (nbytes,))
+                self.log("Reading %i bytes" % (nbytes,))
                 got = self.readdata(nbytes)
                 self.data.append(got)
                 self.datalen += len(got)
@@ -223,7 +226,7 @@ def register_msg(msgtype, payload_size):
 
 @register_msg(VNCConstants.ClientMsgType_SetPixelFormat, payload_size=3 + 16)
 def msg_setpixelformat(server, payload):
-    print("SetPixelFormat: %r" % (payload,))
+    server.log("SetPixelFormat: %r" % (payload,))
 
 
 @register_msg(VNCConstants.ClientMsgType_SetEncodings, payload_size=1 + 2)
@@ -231,16 +234,16 @@ def msg_SetEncodings(server, payload):
     (_, nencodings) = struct.unpack('>BH', payload)
     response = server.read(4 * nencodings, timeout=server.client_timeout)
     if not response:
-        print("Timeout reading SetEncodings data")
+        server.log("Timeout reading SetEncodings data")
         return
     encodings = struct.unpack('>' + 'l' * nencodings, response)
-    print("SetEncodings: %i encodings: (%r)" % (nencodings, encodings))
+    server.log("SetEncodings: %i encodings: (%r)" % (nencodings, encodings))
 
 
 @register_msg(VNCConstants.ClientMsgType_FramebufferUpdateRequest, payload_size=1 + 2 * 4)
 def msg_FramebufferUpdateRequest(server, payload):
     (incremental, xpos, ypos, width, height) = struct.unpack('>BHHHH', payload)
-    print("FramebufferUpdateRequest: incremental=%i, pos=%i,%i, size=%i,%i" % (incremental,
+    server.log("FramebufferUpdateRequest: incremental=%i, pos=%i,%i, size=%i,%i" % (incremental,
                                                                                xpos, ypos,
                                                                                width, height))
 
@@ -248,13 +251,13 @@ def msg_FramebufferUpdateRequest(server, payload):
 @register_msg(VNCConstants.ClientMsgType_KeyEvent, payload_size=1 + 2 + 4)
 def msg_KeyEvent(server, payload):
     (down, _, key) = struct.unpack('>BHL', payload)
-    print("KeyEvent: key=%i, down=%i" % (key, down))
+    server.log("KeyEvent: key=%i, down=%i" % (key, down))
 
 
 @register_msg(VNCConstants.ClientMsgType_PointerEvent, payload_size=1 + 2 * 2)
 def msg_PointerEvent(server, payload):
     (buttons, xpos, ypos) = struct.unpack('>BHH', payload)
-    print("PointerEvent: buttons=%i, pos=%i,%i" % (buttons, xpos, ypos))
+    server.log("PointerEvent: buttons=%i, pos=%i,%i" % (buttons, xpos, ypos))
 
 
 @register_msg(VNCConstants.ClientMsgType_ClientCutText, payload_size=3 + 4)
@@ -262,10 +265,10 @@ def msg_ClientCutText(server, payload):
     (_, textlen) = struct.unpack('>3sL', payload)
     response = server.read(textlen, timeout=server.client_timeout)
     if not response:
-        print("Timeout reading ClientCutText data (2)")
+        server.log("Timeout reading ClientCutText data (2)")
         return
     text = response.decode('iso-8859-1')
-    print("ClientCutText: textlen=%i, text=%r" % (textlen, text))
+    server.log("ClientCutText: textlen=%i, text=%r" % (textlen, text))
 
 
 class VNCServerInstance(socketserver.BaseRequestHandler):
@@ -284,9 +287,12 @@ class VNCServerInstance(socketserver.BaseRequestHandler):
     def write(self, data):
         return self.stream.writedata(data)
 
+    def log(self, message):
+        self.server.client_log(self, message)
+
     def handle(self):
-        print("Request received")
-        print("server: %r" % (self.server,))
+        self.log("Request received")
+        self.log("server: %r" % (self.server,))
         self.server.client_connected(self)
 
         # 7.1.1 ProtocolVersion Handshake
@@ -297,9 +303,9 @@ class VNCServerInstance(socketserver.BaseRequestHandler):
             # FIXME: Report failed connection?
             return
 
-        print("Protocol handshake: {!r}".format(protocol_handshake))
+        self.log("Protocol handshake: {!r}".format(protocol_handshake))
         if not protocol_handshake.startswith('RFB 003'):
-            print("Don't understand the protocol. Giving up.")
+            self.log("Don't understand the protocol. Giving up.")
             # FIXME: Report the failure
             return
         protocol = protocol_handshake[4:]
@@ -314,7 +320,7 @@ class VNCServerInstance(socketserver.BaseRequestHandler):
             response = self.read(1, timeout=self.connect_timeout)
             if not response:
                 # Timeout, or disconnect
-                print("Timed out at Security Handshake")
+                self.log("Timed out at Security Handshake")
                 # FIXME: Report the failure
                 return
             security_requested = bytearray(response)[0]
@@ -324,7 +330,7 @@ class VNCServerInstance(socketserver.BaseRequestHandler):
             security_requested = VNCConstants.Security_None
 
         if security_requested != VNCConstants.Security_None:
-            print("Invalid security type: {}".format(security_requested))
+            self.log("Invalid security type: {}".format(security_requested))
             # FIXME: Report the failure
             return
         # FIXME: Abstract security handling to give us a way to extend here.
@@ -335,14 +341,14 @@ class VNCServerInstance(socketserver.BaseRequestHandler):
         if has_security_result:
             # 7.1.3. SecurityResult Handshake
             data = struct.pack('>L', VNCConstants.SecurityResult_OK)
-            print("Security result: %r" % (data,))
+            self.log("Security result: %r" % (data,))
             self.stream.writedata(data)
 
         # 7.3.1. ClientInit
         response = self.read(1, timeout=self.connect_timeout)
         if not response:
             # Timeout, or disconnect
-            print("Timed out at ClientInit")
+            self.log("Timed out at ClientInit")
             # FIXME: Report the failure
             return
 
@@ -373,7 +379,7 @@ class VNCServerInstance(socketserver.BaseRequestHandler):
                            redshift, greenshift, blueshift,
                            padding,
                            len(name))
-        print("ServerInit message: %r" % (data,))
+        self.log("ServerInit message: %r" % (data,))
         self.stream.writedata(data)
         self.stream.writedata(name)
 
@@ -387,12 +393,12 @@ class VNCServerInstance(socketserver.BaseRequestHandler):
                     name = func.__name__
                     response = self.read(payload_size, timeout=self.client_timeout)
                     if not response:
-                        print("Timeout reading payload data for {}".format(name))
+                        self.log("Timeout reading payload data for {}".format(name))
                         break
                     func(self, response)
 
                 else:
-                    print("Unrecognised message type : %i" % (msgtype,))
+                    self.log("Unrecognised message type : %i" % (msgtype,))
                     break
 
     def finish(self):
@@ -405,10 +411,15 @@ class VNCServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     clients = []
 
     def client_connected(self, client):
+        print("Client connected")
         self.clients.append(client)
 
     def client_disconnected(self, client):
+        print("Client disconnected")
         self.clients.remove(client)
+
+    def client_log(self, client, message):
+        print("Client: {}".format(message))
 
 
 '''
