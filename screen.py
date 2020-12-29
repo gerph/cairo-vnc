@@ -74,6 +74,46 @@ class VNCConstants(object):
     ServerMsgType_ServerCutText = 3
 
 
+class PixelFormat(object):
+    # Default parameters
+    bpp = 32
+    depth = 24
+    endianness = VNCConstants.PixelFormat_LittleEndian
+    truecolour = VNCConstants.PixelFormat_TrueColour
+    redmax = 255
+    greenmax = 255
+    bluemax = 255
+    redshift = 0
+    greenshift = 8
+    blueshift = 16
+    padding = '\x00\x00\x00'
+
+    def __init__(self, data=None):
+        """
+        Pixel Format data structure representation.
+
+        See 7.4 Pixel Format Data Structure.
+        """
+        if data:
+            self.decode(data)
+
+    def decode(self, data):
+        (self.bpp, self.depth, bigendian, truecolour,
+         self.redmax, self.greenmax, self.bluemax,
+         self.redshift, self.greenshift, self.blueshift,
+         _) = struct.unpack('>HHBBBBHHHBBB3sL', data)
+        self.truecolour = VNCConstants.PixelFormat_TrueColour if truecolour else VNCConstants.PixelFormat_Paletted
+        self.endianness = VNCConstants.PixelFormat_BigEndian if bigendian else VNCConstants.PixelFormat_LittleEndian
+
+    def encode(self):
+        data = struct.pack('>BBBBHHHBBB3s',
+                           self.bpp, self.depth, self.endianness, self.truecolour,
+                           self.redmax, self.greenmax, self.bluemax,
+                           self.redshift, self.greenshift, self.blueshift,
+                           '\x00\x00\x00')
+        return data
+
+
 class CommStream(object):
     """
     A communication stream.
@@ -227,6 +267,7 @@ def register_msg(msgtype, payload_size):
 @register_msg(VNCConstants.ClientMsgType_SetPixelFormat, payload_size=3 + 16)
 def msg_setpixelformat(server, payload):
     server.log("SetPixelFormat: %r" % (payload,))
+    server.pixelformat.decode(payload)
 
 
 @register_msg(VNCConstants.ClientMsgType_SetEncodings, payload_size=1 + 2)
@@ -272,6 +313,9 @@ def msg_ClientCutText(server, payload):
 
 
 class VNCServerInstance(socketserver.BaseRequestHandler):
+    """
+    A VNCServerInstance handles communication with one client.
+    """
     connect_timeout = 10
     client_timeout = 10
     security_supported = [
@@ -280,6 +324,18 @@ class VNCServerInstance(socketserver.BaseRequestHandler):
 
     def setup(self):
         self.stream = CommStream(self.request)
+
+        self.pixelformat = PixelFormat()
+        self.pixelformat.bpp = 32
+        self.pixelformat.depth = 24
+        self.pixelformat.endianness = VNCConstants.PixelFormat_LittleEndian
+        self.pixelformat.truecolour = VNCConstants.PixelFormat_TrueColour
+        self.pixelformat.redmax = 255
+        self.pixelformat.greenmax = 255
+        self.pixelformat.bluemax = 255
+        self.pixelformat.redshift = 0
+        self.pixelformat.greenshift = 8
+        self.pixelformat.blueshift = 16
 
     def read(self, size, timeout):
         return self.stream.read_nbytes(size, timeout=timeout)
@@ -359,29 +415,13 @@ class VNCServerInstance(socketserver.BaseRequestHandler):
         # 7.3.2. ServerInit
         width = 640
         height = 480
-        bpp = 32
-        depth = 24
-        endianness = VNCConstants.PixelFormat_LittleEndian
-        truecolour = VNCConstants.PixelFormat_TrueColour
-        redmax = 255
-        greenmax = 255
-        bluemax = 255
-        redshift = 0
-        greenshift = 8
-        blueshift = 16
-        padding = '\x00\x00\x00'
         name = 'cairo'
 
-        data = struct.pack('>HHBBBBHHHBBB3sL',
-                           width, height,
-                           bpp, depth, endianness, truecolour,
-                           redmax, greenmax, bluemax,
-                           redshift, greenshift, blueshift,
-                           padding,
-                           len(name))
+        data_size = struct.pack('>HH', width, height)
+        data_pixelformat = self.pixelformat.encode()
+        data_name = struct.pack('>L', len(name)) + name
         self.log("ServerInit message: %r" % (data,))
-        self.stream.writedata(data)
-        self.stream.writedata(name)
+        self.stream.writedata(data_size + data_pixelformat + data_name)
 
         # Now we read messages from the client
         while not self.stream.closed:
@@ -406,6 +446,9 @@ class VNCServerInstance(socketserver.BaseRequestHandler):
 
 
 class VNCServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
+    """
+    A VNCServer provides the listening socket for a VNC server of a cairo buffer.
+    """
     allow_reuse_address = True
 
     clients = []
