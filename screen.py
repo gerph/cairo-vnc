@@ -211,6 +211,63 @@ class CommStream(object):
         return data
 
 
+message_handlers = {}
+
+
+def register_msg(msgtype, payload_size):
+    def register_func(func):
+        message_handlers[msgtype] = (func, payload_size)
+        return func
+    return register_func
+
+
+@register_msg(VNCConstants.ClientMsgType_SetPixelFormat, payload_size=3 + 16)
+def msg_setpixelformat(server, payload):
+    print("SetPixelFormat: %r" % (payload,))
+
+
+@register_msg(VNCConstants.ClientMsgType_SetEncodings, payload_size=1 + 2)
+def msg_SetEncodings(server, payload):
+    (_, nencodings) = struct.unpack('>BH', payload)
+    response = server.read(4 * nencodings, timeout=server.client_timeout)
+    if not response:
+        print("Timeout reading SetEncodings data")
+        return
+    encodings = struct.unpack('>' + 'l' * nencodings, response)
+    print("SetEncodings: %i encodings: (%r)" % (nencodings, encodings))
+
+
+@register_msg(VNCConstants.ClientMsgType_FramebufferUpdateRequest, payload_size=1 + 2 * 4)
+def msg_FramebufferUpdateRequest(server, payload):
+    (incremental, xpos, ypos, width, height) = struct.unpack('>BHHHH', payload)
+    print("FramebufferUpdateRequest: incremental=%i, pos=%i,%i, size=%i,%i" % (incremental,
+                                                                               xpos, ypos,
+                                                                               width, height))
+
+
+@register_msg(VNCConstants.ClientMsgType_KeyEvent, payload_size=1 + 2 + 4)
+def msg_KeyEvent(server, payload):
+    (down, _, key) = struct.unpack('>BHL', payload)
+    print("KeyEvent: key=%i, down=%i" % (key, down))
+
+
+@register_msg(VNCConstants.ClientMsgType_PointerEvent, payload_size=1 + 2 * 2)
+def msg_PointerEvent(server, payload):
+    (buttons, xpos, ypos) = struct.unpack('>BHH', payload)
+    print("PointerEvent: buttons=%i, pos=%i,%i" % (buttons, xpos, ypos))
+
+
+@register_msg(VNCConstants.ClientMsgType_ClientCutText, payload_size=3 + 4)
+def msg_ClientCutText(server, payload):
+    (_, textlen) = struct.unpack('>3sL', payload)
+    response = server.read(textlen, timeout=server.client_timeout)
+    if not response:
+        print("Timeout reading ClientCutText data (2)")
+        return
+    text = response.decode('iso-8859-1')
+    print("ClientCutText: textlen=%i, text=%r" % (textlen, text))
+
+
 class VNCServerInstance(socketserver.BaseRequestHandler):
     connect_timeout = 10
     client_timeout = 10
@@ -220,6 +277,12 @@ class VNCServerInstance(socketserver.BaseRequestHandler):
 
     def setup(self):
         self.stream = CommStream(self.request)
+
+    def read(self, size, timeout):
+        return self.stream.read_nbytes(size, timeout=timeout)
+
+    def write(self, data):
+        return self.stream.writedata(data)
 
     def handle(self):
         print("Request received")
@@ -248,7 +311,7 @@ class VNCServerInstance(socketserver.BaseRequestHandler):
             data = bytearray(security_data)
             self.stream.writedata(data)
 
-            response = self.stream.read_nbytes(1, timeout=self.connect_timeout)
+            response = self.read(1, timeout=self.connect_timeout)
             if not response:
                 # Timeout, or disconnect
                 print("Timed out at Security Handshake")
@@ -276,7 +339,7 @@ class VNCServerInstance(socketserver.BaseRequestHandler):
             self.stream.writedata(data)
 
         # 7.3.1. ClientInit
-        response = self.stream.read_nbytes(1, timeout=self.connect_timeout)
+        response = self.read(1, timeout=self.connect_timeout)
         if not response:
             # Timeout, or disconnect
             print("Timed out at ClientInit")
@@ -316,68 +379,17 @@ class VNCServerInstance(socketserver.BaseRequestHandler):
 
         # Now we read messages from the client
         while not self.stream.closed:
-            response = self.stream.read_nbytes(1, timeout=self.client_timeout)
+            response = self.read(1, timeout=self.client_timeout)
             if response:
                 msgtype = bytearray(response)[0]
-                if msgtype == VNCConstants.ClientMsgType_SetPixelFormat:
-                    response = self.stream.read_nbytes(3 + 16, timeout=self.client_timeout)
+                if msgtype in message_handlers:
+                    (func, payload_size) = message_handlers[msgtype]
+                    name = func.__name__
+                    response = self.read(payload_size, timeout=self.client_timeout)
                     if not response:
-                        print("Timeout reading SetPixelFormat data")
+                        print("Timeout reading payload data for {}".format(name))
                         break
-                    print("SetPixelFormat: %r" % (response,))
-                    # FIXME: Select the pixel format
-
-                elif msgtype == VNCConstants.ClientMsgType_SetEncodings:
-                    response = self.stream.read_nbytes(1 + 2, timeout=self.client_timeout)
-                    if not response:
-                        print("Timeout reading SetEncodings data")
-                        break
-                    (_, nencodings) = struct.unpack('>BH', response)
-                    response = self.stream.read_nbytes(4 * nencodings, timeout=self.client_timeout)
-                    if not response:
-                        print("Timeout reading SetEncodings data (2)")
-                        break
-                    encodings = struct.unpack('>' + 'l' * nencodings, response)
-                    print("SetEncodings: %i encodings: (%r)" % (nencodings, encodings))
-
-                elif msgtype == VNCConstants.ClientMsgType_FramebufferUpdateRequest:
-                    response = self.stream.read_nbytes(1 + 2 * 4, timeout=self.client_timeout)
-                    if not response:
-                        print("Timeout reading FramebufferUpdateRequest data")
-                        break
-                    (incremental, xpos, ypos, width, height) = struct.unpack('>BHHHH', response)
-                    print("FramebufferUpdateRequest: incremental=%i, pos=%i,%i, size=%i,%i" % (incremental,
-                                                                                               xpos, ypos,
-                                                                                               width, height))
-
-                elif msgtype == VNCConstants.ClientMsgType_KeyEvent:
-                    response = self.stream.read_nbytes(1 + 2 + 4, timeout=self.client_timeout)
-                    if not response:
-                        print("Timeout reading KeyEvent data")
-                        break
-                    (down, _, key) = struct.unpack('>BHL', response)
-                    print("KeyEvent: key=%i, down=%i" % (key, down))
-
-                elif msgtype == VNCConstants.ClientMsgType_PointerEvent:
-                    response = self.stream.read_nbytes(1 + 2 * 2, timeout=self.client_timeout)
-                    if not response:
-                        print("Timeout reading PointerEvent data")
-                        break
-                    (buttons, xpos, ypos) = struct.unpack('>BHH', response)
-                    print("PointerEvent: buttons=%i, pos=%i,%i" % (buttons, xpos, ypos))
-
-                elif msgtype == VNCConstants.ClientMsgType_ClientCutText:
-                    response = self.stream.read_nbytes(3 + 4, timeout=self.client_timeout)
-                    if not response:
-                        print("Timeout reading ClientCutText data")
-                        break
-                    (_, textlen) = struct.unpack('>3sL', response)
-                    response = self.stream.read_nbytes(textlen, timeout=self.client_timeout)
-                    if not response:
-                        print("Timeout reading ClientCutText data (2)")
-                        break
-                    text = response.decode('iso-8859-1')
-                    print("ClientCutText: textlen=%i, text=%r" % (textlen, text))
+                    func(self, response)
 
                 else:
                     print("Unrecognised message type : %i" % (msgtype,))
