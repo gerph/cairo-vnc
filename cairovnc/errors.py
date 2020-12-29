@@ -9,7 +9,14 @@ class CairoVNCError(Exception):
     pass
 
 
-class CairoVNCBadFormatError(CairoVNCError):
+class CairoVNCBadPixelFormatError(CairoVNCError):
+    """
+    Raised when the PixelFormat used by the client is not supported.
+    """
+    pass
+
+
+class CairoVNCBadSurfaceFormatError(CairoVNCError):
     """
     Raised when the format used by the Cairo surface is not supported.
     """

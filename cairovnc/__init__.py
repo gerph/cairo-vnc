@@ -14,6 +14,61 @@ from .constants import VNCConstants
 from .surfacedata import SurfaceData
 
 
+def converter_null(rowdata):
+    return rowdata
+
+
+class GenericConverter(object):
+    """
+    A handler for generic conversion of bitmap data.
+    """
+
+    def __init__(self, big_endian, bpp, pixel_format):
+        self.bpp = bpp
+        self.big_endian = big_endian
+        self.width = -1
+        self.in_format = ''
+        self.out_format = ''
+        self.pixel_format = pixel_format
+
+    def __call__(self, rowdata):
+        """
+        Convert from little endian 0x??RRGGBB to correct endianness and bitness.
+        """
+        width = len(rowdata) / 4
+        if width != self.width:
+            if self.bpp == 32:
+                pack_format = 'L'
+            elif self.bpp == 16:
+                pack_format = 'H'
+            elif self.bpp == 8:
+                pack_format = 'B'
+            else:
+                raise CairoVNCBadPixelFormatError("PixelFormat for {} bit data is not supported".format(self.width))
+            in_format = '<' + ('L' * width)
+            if self.big_endian:
+                out_format = '>' + (pack_format * width)
+            else:
+                out_format = '<' + (pack_format * width)
+            self.in_format = in_format
+            self.out_format = out_format
+            self.width = width
+
+        in_words = struct.unpack(self.in_format, rowdata)
+        out_words = []
+        for word in in_words:
+            r = (word>>16) & self.pixel_format.redmax
+            g = (word>>8) & self.pixel_format.greenmax
+            b = (word>>0) & self.pixel_format.bluemax
+            word = ((r<<self.pixel_format.redshift) |
+                    (g<<self.pixel_format.greenshift) |
+                    (b<<self.pixel_format.blueshift))
+            out_words.append(word)
+
+        out_data = struct.pack(self.out_format, *out_words)
+        return out_data
+
+
 class PixelFormat(object):
     # Default parameters
     bpp = 32
@@ -23,9 +78,9 @@ class PixelFormat(object):
     redmax = 255
     greenmax = 255
     bluemax = 255
-    redshift = 0
+    redshift = 16
     greenshift = 8
-    blueshift = 16
+    blueshift = 0
     padding = '\x00\x00\x00'
 
     def __init__(self, data=None):
@@ -34,6 +89,7 @@ class PixelFormat(object):
 
         See 7.4 Pixel Format Data Structure.
         """
+        self._converter = None
         if data:
             self.decode(data)
 
@@ -51,6 +107,7 @@ class PixelFormat(object):
          _) = struct.unpack('>BBBBHHHBBB3s', data)
         self.truecolour = VNCConstants.PixelFormat_TrueColour if truecolour else VNCConstants.PixelFormat_Paletted
         self.endianness = VNCConstants.PixelFormat_BigEndian if bigendian else VNCConstants.PixelFormat_LittleEndian
+        self._converter = None
 
     def encode(self):
         data = struct.pack('>BBBBHHHBBB3s',
@@ -59,6 +116,41 @@ class PixelFormat(object):
                            self.redshift, self.greenshift, self.blueshift,
                            '\x00\x00\x00')
         return data
+
+    @property
+    def converter(self):
+        """
+        Return a function which will convert from the internal format we're using to what they requested.
+
+        The converter should be passed a row of data as a bytes object.
+        """
+        if self._converter:
+            return self._converter
+
+        if not self.truecolour:
+            raise CairoVNCBadPixelFormatError("Paletted PixelFormats are not supported")
+
+        if self.bpp == 32 and \
+           self.endianness == VNCConstants.PixelFormat_LittleEndian and \
+           self.redmax == 255 and self.redshift == 16 and \
+           self.greenmax == 255 and self.greenshift == 8 and \
+           self.bluemax == 255 and self.blueshift == 0:
+            # This is the same format as our internal data, so it's a pass through
+            self._converter = converter_null
+
+        elif self.bpp == 32 and \
+             self.endianness == VNCConstants.PixelFormat_BigEndian and \
+             self.redmax == 255 and self.redshift == 8 and \
+             self.greenmax == 255 and self.greenshift == 16 and \
+             self.bluemax == 255 and self.blueshift == 24:
+            # This means the exact same thing, but represented in bigendian words
+            self._converter = converter_null
+
+        else:
+            self._converter = GenericConverter(self.endianness == VNCConstants.PixelFormat_BigEndian, self.bpp,
+                                               self)
+
+        return self._converter
 
 
 class CommStream(object):
@@ -89,7 +181,7 @@ class CommStream(object):
         """
         Write data to the socket - may be overridden to encrypt the data on the wire
         """
-        self.log("Sending %r" % (data,))
+        #self.log("Sending %r" % (data,))
         self.sock.send(data)
 
     def fionread(self):
@@ -220,7 +312,7 @@ def msg_setpixelformat(server, payload):
 @register_msg(VNCConstants.ClientMsgType_SetEncodings, payload_size=1 + 2)
 def msg_SetEncodings(server, payload):
     (_, nencodings) = struct.unpack('>BH', payload)
-    response = server.read(4 * nencodings, timeout=server.client_timeout)
+    response = server.read(4 * nencodings, timeout=server.payload_timeout)
     if not response:
         server.log("Timeout reading SetEncodings data")
         return
@@ -254,7 +346,7 @@ def msg_PointerEvent(server, payload):
 @register_msg(VNCConstants.ClientMsgType_ClientCutText, payload_size=3 + 4)
 def msg_ClientCutText(server, payload):
     (_, textlen) = struct.unpack('>3sL', payload)
-    response = server.read(textlen, timeout=server.client_timeout)
+    response = server.read(textlen, timeout=server.payload_timeout)
     if not response:
         server.log("Timeout reading ClientCutText data (2)")
         return
@@ -295,6 +387,7 @@ class VNCServerInstance(socketserver.BaseRequestHandler):
     """
     connect_timeout = 10
     client_timeout = 10
+    payload_timeout = 5
     security_supported = [
         VNCConstants.Security_None
     ]
@@ -310,13 +403,14 @@ class VNCServerInstance(socketserver.BaseRequestHandler):
         self.pixelformat.redmax = 255
         self.pixelformat.greenmax = 255
         self.pixelformat.bluemax = 255
-        self.pixelformat.redshift = 0
+        self.pixelformat.redshift = 16
         self.pixelformat.greenshift = 8
-        self.pixelformat.blueshift = 16
+        self.pixelformat.blueshift = 0
 
         # The capabilities for communicating with the client
         self.capabilities = set([])
         self.request_regions = []
+        self.last_rows = {}
 
     def disconnect(self):
         """
@@ -401,6 +495,8 @@ class VNCServerInstance(socketserver.BaseRequestHandler):
 
         # 7.3.2. ServerInit
         (width, height, rows) = self.server.surface_data()
+        self.width = width
+        self.height = height
         name = self.server.display_name
 
         data_size = struct.pack('>HH', width, height)
@@ -417,7 +513,7 @@ class VNCServerInstance(socketserver.BaseRequestHandler):
                 if msgtype in message_handlers:
                     (func, payload_size) = message_handlers[msgtype]
                     name = func.__name__
-                    response = self.read(payload_size, timeout=self.client_timeout)
+                    response = self.read(payload_size, timeout=self.payload_timeout)
                     if not response:
                         self.log("Timeout reading payload data for {}".format(name))
                         break
@@ -426,6 +522,61 @@ class VNCServerInstance(socketserver.BaseRequestHandler):
                 else:
                     self.log("Unrecognised message type : %i" % (msgtype,))
                     break
+
+            if self.request_regions:
+                # They requested some region to be drawn, so we should dispatch
+                # a frame buffer update
+                while self.request_regions:
+                    region = self.request_regions.pop(0)
+                    self.update_framebuffer(region)
+
+    def update_framebuffer(self, region):
+        """
+        Framebuffer updates here use only whole rows, because we're lazy here.
+        """
+        (width, height, surface_rows) = self.server.surface_data()
+        if not region.incremental:
+            # Redraw the whole screen because it's not incremental
+            # The range list is a tuple of (row number start, the number of rows to draw)
+            redraw_range = [(region.y0, region.height)]
+        else:
+            redraw_range = []
+            diff_start = None
+            diff_size = 0
+            for y in range(region.y0, region.y0 + region.height):
+                if y < len(surface_rows):
+                    rowdata = surface_rows[y]
+                else:
+                    # Skip the rows if they are not present in the framebuffer
+                    continue
+                diff = rowdata != self.last_rows.get(y, None)
+                if diff:
+                    if diff_start:
+                        diff_size += 1
+                    else:
+                        diff_start = y
+                        diff_size = 1
+                else:
+                    if diff_start:
+                        redraw_range.append((diff_start, diff_size))
+                        diff_start = None
+            if diff_start:
+                redraw_range.append((diff_start, diff_size))
+
+        nrects = len(redraw_range)
+        msg_data = [struct.pack('>BBH', VNCConstants.ServerMsgType_FramebufferUpdate,
+                                        0,
+                                        nrects)]
+        for y0, rows in redraw_range:
+
+            rows_data = [struct.pack('>HHHHl', 0, 0, width, rows, VNCConstants.Encoding_Raw)]
+            for y in range(y0, y0 + rows):
+                rows_data.append(self.pixelformat.converter(surface_rows[y]))
+
+            msg_data.extend(rows_data)
+
+        msg = b''.join(msg_data)
+        self.write(msg)
 
     def finish(self):
         self.server.client_disconnected(self)

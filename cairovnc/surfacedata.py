@@ -77,7 +77,7 @@ class SurfaceData(object):
                 return bytes(row)
         else:
             # Unrecognised format.
-            raise CairoVNCBadFormatError("Cairo data format {} is not supported".format(data_format))
+            raise CairoVNCBadSurfaceFormatError("Cairo surface format {} is not supported".format(data_format))
 
         # We split the returned data into rows as this will be easier for the clients to
         # compare and render only the changes.

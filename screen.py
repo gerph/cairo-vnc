@@ -32,6 +32,19 @@ class Screen(object):
         self.context.move_to(x2, y2)
         self.context.line_to(x3, y3)
         self.context.stroke()
+
+        self.context.set_source_rgb(1, 0, 0)
+        self.context.rectangle(0.1, 0, 0.1, 0.1)
+        self.context.fill()
+
+        self.context.set_source_rgb(0, 1, 0)
+        self.context.rectangle(0.3, 0, 0.1, 0.1)
+        self.context.fill()
+
+        self.context.set_source_rgb(0, 0, 1)
+        self.context.rectangle(0.5, 0, 0.1, 0.1)
+        self.context.fill()
+
         self.surface.write_to_png('image.png')
 
 screen = Screen()
