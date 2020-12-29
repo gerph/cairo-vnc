@@ -81,8 +81,5 @@ if __name__ == "__main__":
     (HOST, PORT) = ("localhost", 5902)
 
     # Create the server
-    server = cairovnc.VNCServer((HOST, PORT), cairovnc.VNCServerInstance, surface=screen.surface)
-
-    # Activate the server; this will keep running until you
-    # interrupt the program with Ctrl-C
+    server = cairovnc.CairoVNCServer(surface=screen.surface)
     server.serve_forever()

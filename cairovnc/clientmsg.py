@@ -63,7 +63,7 @@ def msg_SetEncodings(server, payload):
 def msg_FramebufferUpdateRequest(server, payload):
     (incremental, xpos, ypos, width, height) = struct.unpack('>BHHHH', payload)
     region = RegionRequest(incremental, xpos, ypos, width, height)
-    server.log("FramebufferUpdateRequest: {!r}".format(region))
+    #server.log("FramebufferUpdateRequest: {!r}".format(region))
     server.request_regions.add(region)
 
 

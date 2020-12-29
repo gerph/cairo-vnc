@@ -1,5 +1,10 @@
 """
 Cairo surface served over VNC.
+
+Usage:
+
+    server = cairovnc.CairoVNCServer(surface=surface, port=5900)
+    server.serve_forever()
 """
 
 import array
@@ -162,9 +167,9 @@ class CommStream(object):
         return data
 
 
-class VNCServerInstance(socketserver.BaseRequestHandler):
+class VNCConnection(socketserver.BaseRequestHandler):
     """
-    A VNCServerInstance handles communication with one client.
+    A VNCConnection handles communication with one client.
     """
     connect_timeout = 10
     client_timeout = 10
@@ -340,16 +345,17 @@ class VNCServerInstance(socketserver.BaseRequestHandler):
         msg_data = [struct.pack('>BBH', VNCConstants.ServerMsgType_FramebufferUpdate,
                                         0,
                                         nrects)]
-        self.log("FramebufferUpdate: {} rectangles to send".format(nrects))
-        for y0, rows in redraw_range:
+        if nrects:
+            self.log("FramebufferUpdate: {} rectangles to send".format(nrects))
+            for y0, rows in redraw_range:
 
-            rows_data = [struct.pack('>HHHHl', 0, y0, width, rows, VNCConstants.Encoding_Raw)]
-            self.log("    Sending rows {} - {}".format(y0, y0 + rows))
-            for y in range(y0, y0 + rows):
-                rows_data.append(self.pixelformat.converter(surface_rows[y]))
-                self.last_rows[y] = surface_rows[y]
+                rows_data = [struct.pack('>HHHHl', 0, y0, width, rows, VNCConstants.Encoding_Raw)]
+                self.log("    Sending rows {} - {}".format(y0, y0 + rows))
+                for y in range(y0, y0 + rows):
+                    rows_data.append(self.pixelformat.converter(surface_rows[y]))
+                    self.last_rows[y] = surface_rows[y]
 
-            msg_data.extend(rows_data)
+                msg_data.extend(rows_data)
 
         msg = b''.join(msg_data)
         self.write(msg)
@@ -410,3 +416,25 @@ class VNCServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     def display_name(self, value):
         self._display_name = value
         # FIXME: Notify all clients that the display name has changed
+
+
+class CairoVNCServer(object):
+
+    def __init__(self, surface, host='', port=5902):
+        self.host = host
+        self.port = port
+        self.surface = surface
+        self.server = None
+
+    def start(self):
+        if not self.server:
+            self.server = VNCServer((self.host, self.port), VNCConnection, surface=self.surface)
+
+    def serve_forever(self):
+        self.start()
+        self.server.serve_forever()
+
+    def daemonise(self):
+        self.thread = threading.Thread(target=self.serve_forever)
+        self.thread.daemon = True
+        self.thread.start()
