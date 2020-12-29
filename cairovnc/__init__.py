@@ -169,7 +169,8 @@ class CommStream(object):
         self.fionread_data = array.array('i', [0])
 
     def log(self, message):
-        print("Comm: {}".format(message))
+        #print("Comm: {}".format(message))
+        pass
 
     def readdata(self, nbytes):
         """
@@ -567,11 +568,14 @@ class VNCServerInstance(socketserver.BaseRequestHandler):
         msg_data = [struct.pack('>BBH', VNCConstants.ServerMsgType_FramebufferUpdate,
                                         0,
                                         nrects)]
+        self.log("FramebufferUpdate: {} rectangles to send".format(nrects))
         for y0, rows in redraw_range:
 
-            rows_data = [struct.pack('>HHHHl', 0, 0, width, rows, VNCConstants.Encoding_Raw)]
+            rows_data = [struct.pack('>HHHHl', 0, y0, width, rows, VNCConstants.Encoding_Raw)]
+            self.log("    Sending rows {} - {}".format(y0, y0 + rows))
             for y in range(y0, y0 + rows):
                 rows_data.append(self.pixelformat.converter(surface_rows[y]))
+                self.last_rows[y] = surface_rows[y]
 
             msg_data.extend(rows_data)
 
