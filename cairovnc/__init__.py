@@ -17,6 +17,8 @@ import time
 from .constants import VNCConstants
 from .surfacedata import SurfaceData
 from .pixeldata import PixelFormat
+from .clientmsg import dispatch_msg
+from .regions import Regions
 
 
 class CommStream(object):
@@ -149,7 +151,6 @@ class CommStream(object):
                 self.data.append(got)
                 self.datalen += len(got)
 
-        print("data: %r, %s" % (data, type(data)))
         data = b''.join(data)
         if size:
             # We timed out before all the data was read. Put what we have back at the start
@@ -159,94 +160,6 @@ class CommStream(object):
             return None
 
         return data
-
-
-message_handlers = {}
-
-
-def register_msg(msgtype, payload_size):
-    def register_func(func):
-        message_handlers[msgtype] = (func, payload_size)
-        return func
-    return register_func
-
-
-@register_msg(VNCConstants.ClientMsgType_SetPixelFormat, payload_size=3 + 16)
-def msg_setpixelformat(server, payload):
-    server.pixelformat.decode(payload[3:])
-    server.log("SetPixelFormat: %r" % (server.pixelformat,))
-
-
-@register_msg(VNCConstants.ClientMsgType_SetEncodings, payload_size=1 + 2)
-def msg_SetEncodings(server, payload):
-    (_, nencodings) = struct.unpack('>BH', payload)
-    response = server.read(4 * nencodings, timeout=server.payload_timeout)
-    if not response:
-        server.log("Timeout reading SetEncodings data")
-        return
-    encodings = struct.unpack('>' + 'l' * nencodings, response)
-    server.log("SetEncodings: %i encodings: (%r)" % (nencodings, encodings))
-    encoding_names = (VNCConstants.encoding_names.get(enc, str(enc)) for enc in encodings)
-    server.log("SetEncodings: names: %s" % (', '.join(encoding_names)))
-    server.capabilities = set([encodings])
-
-
-@register_msg(VNCConstants.ClientMsgType_FramebufferUpdateRequest, payload_size=1 + 2 * 4)
-def msg_FramebufferUpdateRequest(server, payload):
-    (incremental, xpos, ypos, width, height) = struct.unpack('>BHHHH', payload)
-    region = RegionRequest(incremental, xpos, ypos, width, height)
-    server.log("FramebufferUpdateRequest: {!r}".format(region))
-    server.request_regions.append(region)
-
-
-@register_msg(VNCConstants.ClientMsgType_KeyEvent, payload_size=1 + 2 + 4)
-def msg_KeyEvent(server, payload):
-    (down, _, key) = struct.unpack('>BHL', payload)
-    server.log("KeyEvent: key=%i, down=%i" % (key, down))
-
-
-@register_msg(VNCConstants.ClientMsgType_PointerEvent, payload_size=1 + 2 * 2)
-def msg_PointerEvent(server, payload):
-    (buttons, xpos, ypos) = struct.unpack('>BHH', payload)
-    server.log("PointerEvent: buttons=%i, pos=%i,%i" % (buttons, xpos, ypos))
-
-
-@register_msg(VNCConstants.ClientMsgType_ClientCutText, payload_size=3 + 4)
-def msg_ClientCutText(server, payload):
-    (_, textlen) = struct.unpack('>3sL', payload)
-    response = server.read(textlen, timeout=server.payload_timeout)
-    if not response:
-        server.log("Timeout reading ClientCutText data (2)")
-        return
-    text = response.decode('iso-8859-1')
-    server.log("ClientCutText: textlen=%i, text=%r" % (textlen, text))
-
-
-class RegionRequest(object):
-    """
-    Container for a region which the client has requested.
-    """
-
-    def __init__(self, incremental, x, y, width, height):
-        self.incremental = bool(incremental)
-        self.x0 = x
-        self.y0 = y
-        self.width = width
-        self.height = height
-
-    def __repr__(self):
-        return "<{}(incremental={}, pos={},{}, size={},{})>".format(self.__class__.__name__,
-                                                                    self.incremental,
-                                                                    self.x0, self.y0,
-                                                                    self.width, self.height)
-
-    @property
-    def x1(self):
-        return self.x0 + self.width
-
-    @property
-    def y1(self):
-        return self.y0 + self.height
 
 
 class VNCServerInstance(socketserver.BaseRequestHandler):
@@ -277,7 +190,7 @@ class VNCServerInstance(socketserver.BaseRequestHandler):
 
         # The capabilities for communicating with the client
         self.capabilities = set([])
-        self.request_regions = []
+        self.request_regions = Regions()
         self.last_rows = {}
 
     def disconnect(self):
@@ -379,25 +292,16 @@ class VNCServerInstance(socketserver.BaseRequestHandler):
             response = self.read(1, timeout=self.client_timeout)
             if response:
                 msgtype = bytearray(response)[0]
-                if msgtype in message_handlers:
-                    (func, payload_size) = message_handlers[msgtype]
-                    name = func.__name__
-                    response = self.read(payload_size, timeout=self.payload_timeout)
-                    if not response:
-                        self.log("Timeout reading payload data for {}".format(name))
-                        break
-                    func(self, response)
-
-                else:
-                    self.log("Unrecognised message type : %i" % (msgtype,))
+                handled = dispatch_msg(msgtype, self)
+                if not handled:
+                    # Something went wrong; so we're done with this connection
                     break
 
-            if self.request_regions:
-                # They requested some region to be drawn, so we should dispatch
-                # a frame buffer update
-                while self.request_regions:
-                    region = self.request_regions.pop(0)
-                    self.update_framebuffer(region)
+            # If they requested some region to be drawn, so we should dispatch
+            # a frame buffer update
+            while self.request_regions:
+                region = self.request_regions.pop()
+                self.update_framebuffer(region)
 
     def update_framebuffer(self, region):
         """
