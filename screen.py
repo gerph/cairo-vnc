@@ -378,9 +378,9 @@ def msg_SetEncodings(server, payload):
 @register_msg(VNCConstants.ClientMsgType_FramebufferUpdateRequest, payload_size=1 + 2 * 4)
 def msg_FramebufferUpdateRequest(server, payload):
     (incremental, xpos, ypos, width, height) = struct.unpack('>BHHHH', payload)
-    server.log("FramebufferUpdateRequest: incremental=%i, pos=%i,%i, size=%i,%i" % (incremental,
-                                                                                    xpos, ypos,
-                                                                                    width, height))
+    region = RegionRequest(incremental, xpos, ypos, width, height)
+    server.log("FramebufferUpdateRequest: {!r}".format(region))
+    server.request_regions.append(region)
 
 
 @register_msg(VNCConstants.ClientMsgType_KeyEvent, payload_size=1 + 2 + 4)
@@ -404,6 +404,33 @@ def msg_ClientCutText(server, payload):
         return
     text = response.decode('iso-8859-1')
     server.log("ClientCutText: textlen=%i, text=%r" % (textlen, text))
+
+
+class RegionRequest(object):
+    """
+    Container for a region which the client has requested.
+    """
+
+    def __init__(self, incremental, x, y, width, height):
+        self.incremental = bool(incremental)
+        self.x0 = x
+        self.y0 = y
+        self.width = width
+        self.height = height
+
+    def __repr__(self):
+        return "<{}(incremental={}, pos={},{}, size={},{})>".format(self.__class__.__name__,
+                                                                    self.incremental,
+                                                                    self.x0, self.y0,
+                                                                    self.width, self.height)
+
+    @property
+    def x1(self):
+        return self.x0 + self.width
+
+    @property
+    def y1(self):
+        return self.y0 + self.height
 
 
 class VNCServerInstance(socketserver.BaseRequestHandler):
@@ -433,6 +460,14 @@ class VNCServerInstance(socketserver.BaseRequestHandler):
 
         # The capabilities for communicating with the client
         self.capabilities = set([])
+        self.request_regions = []
+
+    def disconnect(self):
+        """
+        Request to disconnect this client.
+        """
+        # We flag this by treating the stream as closed, so that we exit our handling loop
+        self.stream.closed = True
 
     def read(self, size, timeout):
         return self.stream.read_nbytes(size, timeout=timeout)
