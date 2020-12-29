@@ -35,7 +35,7 @@ class GenericConverter(object):
         """
         Convert from little endian 0x??RRGGBB to correct endianness and bitness.
         """
-        width = len(rowdata) / 4
+        width = int(len(rowdata) / 4)
         if width != self.width:
             if self.bpp == 32:
                 pack_format = 'L'
@@ -81,7 +81,7 @@ class PixelFormat(object):
     redshift = 16
     greenshift = 8
     blueshift = 0
-    padding = '\x00\x00\x00'
+    padding = b'\x00\x00\x00'
 
     def __init__(self, data=None):
         """
@@ -114,7 +114,7 @@ class PixelFormat(object):
                            self.bpp, self.depth, self.endianness, self.truecolour,
                            self.redmax, self.greenmax, self.bluemax,
                            self.redshift, self.greenshift, self.blueshift,
-                           '\x00\x00\x00')
+                           self.padding)
         return data
 
     @property
@@ -262,7 +262,7 @@ class CommStream(object):
                     self.datalen -= len(first)
                     size -= len(first)
                 else:
-                    data = first[:size]
+                    data.append(first[:size])
                     self.data[0] = first[size:]
                     self.datalen -= size
                     size = 0
@@ -283,6 +283,7 @@ class CommStream(object):
                 self.data.append(got)
                 self.datalen += len(got)
 
+        print("data: %r, %s" % (data, type(data)))
         data = b''.join(data)
         if size:
             # We timed out before all the data was read. Put what we have back at the start
@@ -434,22 +435,22 @@ class VNCServerInstance(socketserver.BaseRequestHandler):
         self.server.client_connected(self)
 
         # 7.1.1 ProtocolVersion Handshake
-        self.stream.writedata('RFB 003.008\n')
+        self.stream.writedata(b'RFB 003.008\n')
 
-        protocol_handshake = self.stream.read_upto(terminator='\n', timeout=self.connect_timeout)
+        protocol_handshake = self.stream.read_upto(terminator=b'\n', timeout=self.connect_timeout)
         if not protocol_handshake:
             # FIXME: Report failed connection?
             return
 
         self.log("Protocol handshake: {!r}".format(protocol_handshake))
-        if not protocol_handshake.startswith('RFB 003'):
+        if not protocol_handshake.startswith(b'RFB 003'):
             self.log("Don't understand the protocol. Giving up.")
             # FIXME: Report the failure
             return
         protocol = protocol_handshake[4:]
 
         # 7.1.2. Security handshake
-        if protocol >= '003.007':
+        if protocol >= b'003.007':
             security_data = [len(self.security_supported)]
             security_data.extend(self.security_supported)
             data = bytearray(security_data)
@@ -474,7 +475,7 @@ class VNCServerInstance(socketserver.BaseRequestHandler):
         # FIXME: Abstract security handling to give us a way to extend here.
 
         # For 'No encryption' there isn't a SecurityResult prior to 3.8
-        has_security_result = (protocol >= '003.008')
+        has_security_result = (protocol >= b'003.008')
 
         if has_security_result:
             # 7.1.3. SecurityResult Handshake
@@ -502,7 +503,8 @@ class VNCServerInstance(socketserver.BaseRequestHandler):
 
         data_size = struct.pack('>HH', width, height)
         data_pixelformat = self.pixelformat.encode()
-        data_name = struct.pack('>L', len(name)) + name
+        name_latin1 = name.encode('iso-8859-1')
+        data_name = struct.pack('>L', len(name_latin1)) + name_latin1
         self.log("ServerInit message: %r" % (data,))
         self.stream.writedata(data_size + data_pixelformat + data_name)
 
