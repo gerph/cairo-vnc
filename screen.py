@@ -1,0 +1,419 @@
+# Testing the cairo system
+
+import cairo
+
+class Screen(object):
+    def __init__(self):
+        self.width = 200
+        self.height = 200
+
+        self.surface = cairo.ImageSurface(cairo.Format.ARGB32, self.width, self.height)
+        self.context = cairo.Context(self.surface)
+        self.context.set_source_rgb(0.5, 0.5, 0.5)
+        self.context.rectangle(0, 0, self.width, self.height)
+        self.context.fill()
+
+        self.context.set_source_rgb(1, 1, 1)
+
+        x, y, x1, y1 = 0.1, 0.5, 0.4, 0.9
+        x2, y2, x3, y3 = 0.6, 0.1, 0.9, 0.5
+        self.context.scale(200, 200)
+        self.context.set_line_width(0.04)
+        self.context.move_to(x, y)
+        self.context.curve_to(x1, y1, x2, y2, x3, y3)
+        self.context.stroke()
+
+        self.context.set_source_rgba(1, 0.2, 0.2, 0.6)
+        self.context.set_line_width(0.02)
+        self.context.move_to(x, y)
+        self.context.line_to(x1, y1)
+        self.context.move_to(x2, y2)
+        self.context.line_to(x3, y3)
+        self.context.stroke()
+        self.surface.write_to_png('image.png')
+
+screen = Screen()
+
+
+import array
+import fcntl
+import select
+import struct
+import socketserver
+import termios
+import time
+
+
+class VNCConstants(object):
+
+    Security_Invalid = 0
+    Security_None = 1
+    Security_VNCAuth = 2
+
+    SecurityResult_OK = 0
+    SecurityResult_Failed = 1
+
+    ClientInit_Exclusive = 0
+    # All other values are shared access
+
+    PixelFormat_BigEndian = 1
+    PixelFormat_LittleEndian = 0
+    PixelFormat_TrueColour = 1
+    PixelFormat_Paletted = 0
+
+    ClientMsgType_SetPixelFormat = 0
+    ClientMsgType_SetEncodings = 2
+    ClientMsgType_FramebufferUpdateRequest = 3
+    ClientMsgType_KeyEvent = 4
+    ClientMsgType_PointerEvent = 5
+    ClientMsgType_ClientCutText = 6
+
+    ServerMsgType_FramebufferUpdate = 0
+    ServerMsgType_SetColourMapEntries = 1
+    ServerMsgType_Bell = 2
+    ServerMsgType_ServerCutText = 3
+
+
+class CommStream(object):
+    """
+    A communication stream.
+
+    Replace this for encrypted traffic.
+    """
+    default_timeout = 2
+
+    def __init__(self, sock):
+        self.sock = sock
+        self.closed = False
+        self.data = []
+        self.datalen = 0
+        self.fionread_data = array.array('i', [0])
+
+    def readdata(self, nbytes):
+        """
+        Read data from the socket - may be overridden to decrypt the data from the wire
+        """
+        return self.sock.recv(nbytes)
+
+    def writedata(self, data):
+        """
+        Write data to the socket - may be overridden to encrypt the data on the wire
+        """
+        print("Sending %r" % (data,))
+        self.sock.send(data)
+
+    def fionread(self):
+        if fcntl.ioctl(self.sock, termios.FIONREAD, self.fionread_data) == -1:
+            return -1
+        return struct.unpack('I', self.fionread_data)[0]
+
+    def read_upto(self, terminator, timeout=None):
+        """
+        Read data until we hit a terminator, or timeout.
+
+        @param terminator:  Terminating string
+        @param timeout:     Timeout in seconds
+
+        @return: string before terminator, or None if timed out
+        """
+        if not timeout:
+            timeout = self.default_timeout
+        endtime = time.time() + timeout
+        if self.data:
+            # The data might already be present
+            current_data = b''.join(self.data)
+            index = current_data.find(terminator)
+            if index != -1:
+                self.data = [current_data[index + len(terminator):]]
+                self.datalen = len(self.data[0])
+                return current_data[:index]
+            self.data = []
+            self.datalen = 0
+        else:
+            current_data = b''
+
+        while True:
+            timeout = endtime - time.time()
+            if timeout <= 0:
+                break
+            (rlist, wlist, xlist) = select.select([self.sock], [], [], timeout)
+            if rlist:
+                nbytes = self.fionread()
+                if nbytes == 0:
+                    self.closed = True
+                    break
+                current_data += self.readdata(nbytes)
+                index = current_data.find(terminator)
+                if index != -1:
+                    self.data = [current_data[index + len(terminator):]]
+                    self.datalen = len(self.data[0])
+                    return current_data[:index]
+
+        self.data = [current_data]
+        self.datalen = len(current_data)
+        return None
+
+    def read_nbytes(self, size, timeout=None):
+        """
+        Read a fixed number of bytes, or timeout.
+
+        @param size:    number of bytes to read
+        @param timeout:     Timeout in seconds
+
+        @return: bytes read, or None if timed out
+        """
+        if not timeout:
+            timeout = self.default_timeout
+        endtime = time.time() + timeout
+        data = []
+        while True:
+            timeout = endtime - time.time()
+            if timeout <= 0:
+                break
+
+            while self.datalen >= size and size != 0:
+                first = self.data[0]
+                if len(first) <= size:
+                    data.append(first)
+                    self.data.pop(0)
+                    self.datalen -= len(first)
+                    size -= len(first)
+                else:
+                    data = first[:size]
+                    self.data[0] = first[size:]
+                    self.datalen -= size
+                    size = 0
+            if size == 0:
+                break
+
+            # Put more data into the buffer
+            print("Awaiting %i bytes (got %r, buffered %r, datalen %r)" % (size, data, self.data, self.datalen))
+            (rlist, wlist, xlist) = select.select([self.sock], [], [], timeout)
+            if rlist:
+                nbytes = self.fionread()
+                if nbytes == 0:
+                    # Connection was closed
+                    self.closed = True
+                    break
+                print("Reading %i bytes" % (nbytes,))
+                got = self.readdata(nbytes)
+                self.data.append(got)
+                self.datalen += len(got)
+
+        data = b''.join(data)
+        if size:
+            # We timed out before all the data was read. Put what we have back at the start
+            # of the buffer.
+            if data:
+                self.data.insert(0, data)
+            return None
+
+        return data
+
+
+class VNCServerInstance(socketserver.BaseRequestHandler):
+    connect_timeout = 10
+    client_timeout = 10
+    security_supported = [
+        VNCConstants.Security_None
+    ]
+
+    def setup(self):
+        self.stream = CommStream(self.request)
+
+    def handle(self):
+        print("Request received")
+        print("server: %r" % (self.server,))
+        self.server.client_connected(self)
+
+        # 7.1.1 ProtocolVersion Handshake
+        self.stream.writedata('RFB 003.008\n')
+
+        protocol_handshake = self.stream.read_upto(terminator='\n', timeout=self.connect_timeout)
+        if not protocol_handshake:
+            # FIXME: Report failed connection?
+            return
+
+        print("Protocol handshake: {!r}".format(protocol_handshake))
+        if not protocol_handshake.startswith('RFB 003'):
+            print("Don't understand the protocol. Giving up.")
+            # FIXME: Report the failure
+            return
+        protocol = protocol_handshake[4:]
+
+        # 7.1.2. Security handshake
+        if protocol >= '003.007':
+            security_data = [len(self.security_supported)]
+            security_data.extend(self.security_supported)
+            data = bytearray(security_data)
+            self.stream.writedata(data)
+
+            response = self.stream.read_nbytes(1, timeout=self.connect_timeout)
+            if not response:
+                # Timeout, or disconnect
+                print("Timed out at Security Handshake")
+                # FIXME: Report the failure
+                return
+            security_requested = bytearray(response)[0]
+        else:
+            data = struct.pack('>I', VNCConstants.Security_None)
+            self.stream.writedata(data)
+            security_requested = VNCConstants.Security_None
+
+        if security_requested != VNCConstants.Security_None:
+            print("Invalid security type: {}".format(security_requested))
+            # FIXME: Report the failure
+            return
+        # FIXME: Abstract security handling to give us a way to extend here.
+
+        # For 'No encryption' there isn't a SecurityResult prior to 3.8
+        has_security_result = (protocol >= '003.008')
+
+        if has_security_result:
+            # 7.1.3. SecurityResult Handshake
+            data = struct.pack('>L', VNCConstants.SecurityResult_OK)
+            print("Security result: %r" % (data,))
+            self.stream.writedata(data)
+
+        # 7.3.1. ClientInit
+        response = self.stream.read_nbytes(1, timeout=self.connect_timeout)
+        if not response:
+            # Timeout, or disconnect
+            print("Timed out at ClientInit")
+            # FIXME: Report the failure
+            return
+
+        (shared_flag,) = struct.unpack('B', response)
+        # FIXME: Do we want to honour this or just ignore it?
+        # FIXME: Maybe report it?
+
+        # 7.3.2. ServerInit
+        width = 640
+        height = 480
+        bpp = 32
+        depth = 24
+        endianness = VNCConstants.PixelFormat_LittleEndian
+        truecolour = VNCConstants.PixelFormat_TrueColour
+        redmax = 255
+        greenmax = 255
+        bluemax = 255
+        redshift = 0
+        greenshift = 8
+        blueshift = 16
+        padding = '\x00\x00\x00'
+        name = 'cairo'
+
+        data = struct.pack('>HHBBBBHHHBBB3sL',
+                           width, height,
+                           bpp, depth, endianness, truecolour,
+                           redmax, greenmax, bluemax,
+                           redshift, greenshift, blueshift,
+                           padding,
+                           len(name))
+        print("ServerInit message: %r" % (data,))
+        self.stream.writedata(data)
+        self.stream.writedata(name)
+
+        # Now we read messages from the client
+        while not self.stream.closed:
+            response = self.stream.read_nbytes(1, timeout=self.client_timeout)
+            if response:
+                msgtype = bytearray(response)[0]
+                if msgtype == VNCConstants.ClientMsgType_SetPixelFormat:
+                    response = self.stream.read_nbytes(3 + 16, timeout=self.client_timeout)
+                    if not response:
+                        print("Timeout reading SetPixelFormat data")
+                        break
+                    print("SetPixelFormat: %r" % (response,))
+                    # FIXME: Select the pixel format
+
+                elif msgtype == VNCConstants.ClientMsgType_SetEncodings:
+                    response = self.stream.read_nbytes(1 + 2, timeout=self.client_timeout)
+                    if not response:
+                        print("Timeout reading SetEncodings data")
+                        break
+                    (_, nencodings) = struct.unpack('>BH', response)
+                    response = self.stream.read_nbytes(4 * nencodings, timeout=self.client_timeout)
+                    if not response:
+                        print("Timeout reading SetEncodings data (2)")
+                        break
+                    encodings = struct.unpack('>' + 'l' * nencodings, response)
+                    print("SetEncodings: %i encodings: (%r)" % (nencodings, encodings))
+
+                elif msgtype == VNCConstants.ClientMsgType_FramebufferUpdateRequest:
+                    response = self.stream.read_nbytes(1 + 2 * 4, timeout=self.client_timeout)
+                    if not response:
+                        print("Timeout reading FramebufferUpdateRequest data")
+                        break
+                    (incremental, xpos, ypos, width, height) = struct.unpack('>BHHHH', response)
+                    print("FramebufferUpdateRequest: incremental=%i, pos=%i,%i, size=%i,%i" % (incremental,
+                                                                                               xpos, ypos,
+                                                                                               width, height))
+
+                elif msgtype == VNCConstants.ClientMsgType_KeyEvent:
+                    response = self.stream.read_nbytes(1 + 2 + 4, timeout=self.client_timeout)
+                    if not response:
+                        print("Timeout reading KeyEvent data")
+                        break
+                    (down, _, key) = struct.unpack('>BHL', response)
+                    print("KeyEvent: key=%i, down=%i" % (key, down))
+
+                elif msgtype == VNCConstants.ClientMsgType_PointerEvent:
+                    response = self.stream.read_nbytes(1 + 2 * 2, timeout=self.client_timeout)
+                    if not response:
+                        print("Timeout reading PointerEvent data")
+                        break
+                    (buttons, xpos, ypos) = struct.unpack('>BHH', response)
+                    print("PointerEvent: buttons=%i, pos=%i,%i" % (buttons, xpos, ypos))
+
+                elif msgtype == VNCConstants.ClientMsgType_ClientCutText:
+                    response = self.stream.read_nbytes(3 + 4, timeout=self.client_timeout)
+                    if not response:
+                        print("Timeout reading ClientCutText data")
+                        break
+                    (_, textlen) = struct.unpack('>3sL', response)
+                    response = self.stream.read_nbytes(textlen, timeout=self.client_timeout)
+                    if not response:
+                        print("Timeout reading ClientCutText data (2)")
+                        break
+                    text = response.decode('iso-8859-1')
+                    print("ClientCutText: textlen=%i, text=%r" % (textlen, text))
+
+                else:
+                    print("Unrecognised message type : %i" % (msgtype,))
+                    break
+
+    def finish(self):
+        self.server.client_disconnected(self)
+
+
+class VNCServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
+    allow_reuse_address = True
+
+    clients = []
+
+    def client_connected(self, client):
+        self.clients.append(client)
+
+    def client_disconnected(self, client):
+        self.clients.remove(client)
+
+
+'''
+class VNCServer(object):
+    """
+    A VNCServer providing a simple interface to a Cairo surface.
+    """
+    def __init__(self, port):
+'''
+
+
+if __name__ == "__main__":
+    (HOST, PORT) = ("localhost", 5902)
+
+    # Create the server
+    server = VNCServer((HOST, PORT), VNCServerInstance)
+
+    # Activate the server; this will keep running until you
+    # interrupt the program with Ctrl-C
+    server.serve_forever()
