@@ -6,7 +6,11 @@ import array
 import fcntl
 import select
 import struct
-import socketserver
+try:
+    import socketserver
+except ImportError:
+    # Python 2 compatibility.
+    import SocketServer as socketserver
 import termios
 import time
 
