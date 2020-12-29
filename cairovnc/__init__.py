@@ -11,20 +11,7 @@ import termios
 import time
 
 from .constants import VNCConstants
-
-
-class CairoVNCError(Exception):
-    """
-    Base error class for problems with the CairoVNC classes
-    """
-    pass
-
-
-class CairoVNCBadFormatError(CairoVNCError):
-    """
-    Raised when the format used by the Cairo surface is not supported.
-    """
-    pass
+from .surfacedata import SurfaceData
 
 
 class PixelFormat(object):
@@ -348,8 +335,7 @@ class VNCServerInstance(socketserver.BaseRequestHandler):
         self.server.client_log(self, message)
 
     def handle(self):
-        self.log("Request received")
-        self.log("server: %r" % (self.server,))
+        self.log("Connection received")
         self.server.client_connected(self)
 
         # 7.1.1 ProtocolVersion Handshake
@@ -414,9 +400,8 @@ class VNCServerInstance(socketserver.BaseRequestHandler):
         # FIXME: Maybe report it?
 
         # 7.3.2. ServerInit
-        width = 640
-        height = 480
-        name = 'cairo'
+        (width, height, rows) = self.server.surface_data()
+        name = self.server.display_name
 
         data_size = struct.pack('>HH', width, height)
         data_pixelformat = self.pixelformat.encode()
@@ -452,7 +437,17 @@ class VNCServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     """
     allow_reuse_address = True
 
-    clients = []
+    _surface_data = None
+
+    def __init__(self, *args, **kwargs):
+        self.clients = []
+        self._surface_data = None
+        self._display_name = None
+        self.display_name = kwargs.pop('display_name', 'cairo')
+        self._surface = kwargs.pop('surface', None)
+        # Can't do this on Python 2:
+        #super(VNCServer, self).__init__(*args, **kwargs)
+        socketserver.TCPServer.__init__(self, *args, **kwargs)
 
     def client_connected(self, client):
         print("Client connected")
@@ -466,12 +461,25 @@ class VNCServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         print("Client: {}".format(message))
 
     def surface_data(self):
-        pass
+        if not self._surface_data:
+            self._surface_data = SurfaceData(self.surface)
+        return self._surface_data.get_data()
 
-'''
-class VNCServer(object):
-    """
-    A VNCServer providing a simple interface to a Cairo surface.
-    """
-    def __init__(self, port):
-'''
+    @property
+    def surface(self):
+        return self._surface
+
+    @surface.setter
+    def surface(self, value):
+        self._surface = value
+        self._surface_data = None
+        # FIXME: Notify all clients that the display has changed
+
+    @property
+    def display_name(self):
+        return self._display_name
+
+    @display_name.setter
+    def display_name(self, value):
+        self._display_name = value
+        # FIXME: Notify all clients that the display name has changed
