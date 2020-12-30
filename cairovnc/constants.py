@@ -110,7 +110,7 @@ class VNCConstants(object):
     PseudoEncoding_VMwareLEDState = 0x574d5668
     PseudoEncoding_VMwareDisplayModeChange = 0x574d5669
     PseudoEncoding_VMwareVirtualMachineState = 0x574d566a
-    PseudoEncoding_ExtendedClipboard = 0xc0a1e5ce
+    PseudoEncoding_ExtendedClipboard = -1063131698
 
     encoding_names = {}
 

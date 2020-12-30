@@ -189,8 +189,18 @@ class VNCConnection(socketserver.BaseRequestHandler):
     """
     A VNCConnection handles communication with one client.
     """
+
+    # Timeout for automated transactions during the connection phases
     connect_timeout = 10
+
+    # Timeout for negotiation with the user during the security phase.
+    # Intentionally longer because this is where the user may type a password, etc.
+    security_timeout = 60
+
+    # How regularly we check for changes in our local state (eg screen size, clipboard, etc)
     client_timeout = 10
+
+    # Timeout for receiving any payload data once we know that we're receiving data from client
     payload_timeout = 5
 
     def setup(self):
@@ -274,9 +284,9 @@ class VNCConnection(socketserver.BaseRequestHandler):
             self.sectype = bytearray(response)[0]
         else:
             # FIXME: Decide which security type to declare
-            data = struct.pack('>I', VNCConstants.Security_None)
+            self.sectype = VNCConstants.Security_VNCAuthentication
+            data = struct.pack('>I', self.sectype)
             self.stream.writedata(data)
-            self.sectype = VNCConstants.Security_None
 
         self.security = security_types.get(self.sectype, None)
         if self.security is None:
@@ -284,6 +294,7 @@ class VNCConnection(socketserver.BaseRequestHandler):
             # FIXME: Report the failure
             return
 
+        self.log("Security: {}".format(self.security.name))
         failed = self.security.authenticate()
         self.log("Security result: %r" % (failed or 'Success',))
 
