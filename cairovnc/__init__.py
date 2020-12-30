@@ -365,16 +365,16 @@ class VNCConnection(socketserver.BaseRequestHandler):
                     continue
                 diff = rowdata != self.last_rows.get(y, None)
                 if diff:
-                    if diff_start:
+                    if diff_start is not None:
                         diff_size += 1
                     else:
                         diff_start = y
                         diff_size = 1
                 else:
-                    if diff_start:
+                    if diff_start is not None:
                         redraw_range.append((diff_start, diff_size))
                         diff_start = None
-            if diff_start:
+            if diff_start is not None:
                 redraw_range.append((diff_start, diff_size))
 
         nrects = len(redraw_range)
