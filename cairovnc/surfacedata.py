@@ -53,6 +53,14 @@ class SurfaceData(object):
         self._min_period = value
         self._max_framerate = 1.0 / value
 
+    def get_size(self):
+        """
+        Retrieve just the size of the surface
+        """
+        width = self.surface.get_width()
+        height = self.surface.get_height()
+        return (width, height)
+
     def get_data(self):
         """
         Retrieve the data in rows of pixel values in 4-byte B, G, R, 0 sequences.

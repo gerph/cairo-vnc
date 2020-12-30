@@ -56,7 +56,7 @@ def msg_SetEncodings(server, payload):
     server.log("SetEncodings: %i encodings: (%r)" % (nencodings, encodings))
     encoding_names = (VNCConstants.encoding_names.get(enc, str(enc)) for enc in encodings)
     server.log("SetEncodings: names: %s" % (', '.join(encoding_names)))
-    server.capabilities = set([encodings])
+    server.capabilities = set(encodings)
 
 
 @register_msg(VNCConstants.ClientMsgType_FramebufferUpdateRequest, payload_size=1 + 2 * 4)

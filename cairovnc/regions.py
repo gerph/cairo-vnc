@@ -53,3 +53,6 @@ class Regions(object):
 
     def pop(self):
         return self.regions.pop(0)
+
+    def clear(self):
+        self.regions = []

@@ -23,7 +23,7 @@ from .constants import VNCConstants
 from .surfacedata import SurfaceData
 from .pixeldata import PixelFormat
 from .clientmsg import dispatch_msg
-from .regions import Regions
+from .regions import Regions, RegionRequest
 from .security import get_security_types
 
 
@@ -35,7 +35,14 @@ class CairoVNCOptions(object):
     def __init__(self, host='0.0.0.0', port=5900, password=None):
         self.host = host
         self.port = port
+
+        # Set password to None to allow any connections (although the macOS screen sharing
+        # hangs if you do this).
         self.password = password
+
+        # The maximum speed at which we will deliver frame updates, regardless of what the
+        # clients request.
+        self.max_framerate = 10
 
     def copy(self):
         obj = CairoVNCOptions(host=self.host,
@@ -198,7 +205,7 @@ class VNCConnection(socketserver.BaseRequestHandler):
     security_timeout = 60
 
     # How regularly we check for changes in our local state (eg screen size, clipboard, etc)
-    client_timeout = 10
+    client_timeout = 0.25
 
     # Timeout for receiving any payload data once we know that we're receiving data from client
     payload_timeout = 5
@@ -218,6 +225,10 @@ class VNCConnection(socketserver.BaseRequestHandler):
         self.pixelformat.greenshift = 8
         self.pixelformat.blueshift = 0
 
+        # Current framebuffer size
+        self.width = None
+        self.height = None
+
         self.protocol = None
         self.sectype = None
         self.security = None
@@ -225,10 +236,18 @@ class VNCConnection(socketserver.BaseRequestHandler):
         # We copy the options because they might be changed by security or other interaction.
         self.options = self.server.options.copy()
 
+        # Changes that are pending
+        self.changed_display = False
+        self.changed_name = False
+
         # The capabilities for communicating with the client
         self.capabilities = set([])
         self.request_regions = Regions()
         self.last_rows = {}
+
+    def finish(self):
+        self.server.client_disconnected(self)
+        self.stream.closed = True
 
     def disconnect(self):
         """
@@ -410,6 +429,43 @@ class VNCConnection(socketserver.BaseRequestHandler):
                     # Something went wrong; so we're done with this connection
                     break
 
+            if self.changed_display:
+                # There was a notification that the display was changed, so we may
+                # need to update the framebuffer.
+                # 7.8.2. DesktopSize Pseudo-Encoding
+                (new_width, new_height) = self.server.surface_size()
+                if new_width != self.width or new_height != self.height:
+                    if VNCConstants.PseudoEncoding_DesktopSize in self.capabilities:
+                        # We can only send the new desktop size if it's in the capabilities.
+                        msg = struct.pack('>BBHHHHHl',
+                                          VNCConstants.ServerMsgType_FramebufferUpdate, 0,
+                                          1,  # one rectangle update
+                                          0, 0, new_width, new_height,
+                                          VNCConstants.PseudoEncoding_DesktopSize)
+                        self.log("Notify of DesktopSize {}x{}".format(new_width, new_height))
+                        self.write(msg)
+
+                        # Assume that we have to deliver the entire buffer
+                        self.last_rows = {}
+                    else:
+                        self.log("Client cannot receive DesktopSize {}x{}".format(new_width, new_height))
+
+                    # Any updates that are pending will be irrelevant now, but if there
+                    # are any they should be replaced by a full redraw.
+                    if self.request_regions:
+                        self.request_regions.clear()
+                        self.request_regions.add(RegionRequest(incremental=False,
+                                                               x=0, y=0,
+                                                               width=new_width, height=new_height))
+                        # We should expect the client to send a request for the whole screen
+                        # on receipt of the DesktopSize message, BUT the above message ensures
+                        # that if they had an outstanding FramebufferUpdate sent, there remains
+                        # a response to it. Otherwise the client might get stuck believing there
+                        # is a request pending and not sending another.
+                self.width = new_width
+                self.height = new_height
+                self.changed_display = False
+
             # If they requested some region to be drawn, so we should dispatch
             # a frame buffer update
             while self.request_regions:
@@ -468,8 +524,23 @@ class VNCConnection(socketserver.BaseRequestHandler):
         msg = b''.join(msg_data)
         self.write(msg)
 
-    def finish(self):
-        self.server.client_disconnected(self)
+    def change_surface(self):
+        """
+        The display surface has changed, so we might need to issue a DesktopSize.
+        """
+        self.changed_display = True
+
+
+class NullLock(object):
+    """
+    A lock that does nothing.
+    """
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exctype, excvalue, exctb):
+        pass
 
 
 class VNCServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
@@ -478,18 +549,26 @@ class VNCServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     """
     allow_reuse_address = True
 
-    _surface_data = None
-
     def __init__(self, *args, **kwargs):
         self.clients = []
         self._surface_data = None
         self._display_name = None
         self.options = kwargs.pop('options')
         self.display_name = kwargs.pop('display_name', 'cairo')
-        self._surface = kwargs.pop('surface', None)
+        self.surface = kwargs.pop('surface', None)
+        self.surface_lock = kwargs.pop('surface_lock', None)
         # Can't do this on Python 2:
         #super(VNCServer, self).__init__(*args, **kwargs)
         socketserver.TCPServer.__init__(self, *args, **kwargs)
+
+    def server_close(self):
+        # Can't do this on Python 2:
+        #super(VNCServer, self).server_close()
+        socketserver.TCPServer.server_close()
+
+        for client in self.clients:
+            # Mark the clients as disconnected so that they close down
+            client.disconnect()
 
     def client_connected(self, client):
         print("Client connected")
@@ -504,18 +583,31 @@ class VNCServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
 
     def surface_data(self):
         if not self._surface_data:
-            self._surface_data = SurfaceData(self.surface)
+            print("Updating surface_data")
+            self._surface_data = SurfaceData(self.surface, max_framerate=self.options.max_framerate)
         return self._surface_data.get_data()
 
-    @property
-    def surface(self):
-        return self._surface
+    def surface_size(self):
+        if not self._surface_data:
+            print("Updating surface_data")
+            self._surface_data = SurfaceData(self.surface, max_framerate=self.options.max_framerate)
+        return self._surface_data.get_size()
 
-    @surface.setter
-    def surface(self, value):
-        self._surface = value
+    def change_surface(self, surface, surface_lock):
+        print("change_surface")
+        self.surface_lock = surface_lock or NullLock()
+
+        if self.surface == surface:
+            # No change, so don't perform any update and don't invalidate the data
+            return
+
+        self.surface = surface
         self._surface_data = None
-        # FIXME: Notify all clients that the display has changed
+
+        # Notify all clients that the display has changed
+        print("Surface changing ({} clients)".format(len(self.clients)))
+        for client in self.clients:
+            client.change_surface()
 
     @property
     def display_name(self):
@@ -524,28 +616,56 @@ class VNCServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     @display_name.setter
     def display_name(self, value):
         self._display_name = value
-        # FIXME: Notify all clients that the display name has changed
+
+        # Notify all clients that the display name has changed
+        for client in self.clients:
+            client.name_change()
 
 
 class CairoVNCServer(object):
+    # The class to use for connections (override if you are subclassing)
+    connection_class = VNCConnection
 
-    def __init__(self, surface, host='', port=5902, options=None):
+    def __init__(self, surface, host='', port=5902, surface_lock=None, options=None):
         if options is None:
             options = CairoVNCOptions(host=host, port=port)
         self.options = options
         self.surface = surface
+        self.surface_lock = None
+
+        # The object currently available for serving
         self.server = None
+        # The thread the server is running on
+        self.thread = None
 
     def start(self):
         if not self.server:
-            self.server = VNCServer((self.options.host, self.options.port), VNCConnection,
+            self.server = VNCServer((self.options.host, self.options.port),
+                                    self.connection_class,
                                     surface=self.surface, options=self.options)
+
+    def stop(self):
+        if self.thread:
+            # Note: This will block until the server has shut down.
+            self.shutdown()
+            self.thread = None
+        elif self.server:
+            self.server.server_close()
+            self.server = None
 
     def serve_forever(self):
         self.start()
         self.server.serve_forever()
+        self.server.server_close()
+        self.serevr = None
 
     def daemonise(self):
         self.thread = threading.Thread(target=self.serve_forever)
         self.thread.daemon = True
         self.thread.start()
+
+    def change_surface(self, surface, surface_lock=None):
+        if self.server:
+            self.surface = surface
+            self.surface_lock = surface_lock
+            self.server.change_surface(surface, surface_lock)
