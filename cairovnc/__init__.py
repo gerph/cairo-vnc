@@ -246,26 +246,39 @@ class VNCConnection(socketserver.BaseRequestHandler):
     def log(self, message):
         self.server.client_log(self, message)
 
-    def handle(self):
-        self.log("Connection received")
-        self.server.client_connected(self)
+    def do_protocol(self):
+        """
+        7.1.1 ProtocolVersion Handshake
 
-        # 7.1.1 ProtocolVersion Handshake
+        Announce ourselves, and find out what protocol they want to speak.
+
+        @return: True if we were successful; False if something went wrong.
+        """
         self.stream.writedata(b'RFB 003.008\n')
 
         protocol_handshake = self.stream.read_upto(terminator=b'\n', timeout=self.connect_timeout)
         if not protocol_handshake:
             # FIXME: Report failed connection?
-            return
+            return False
 
         self.log("Protocol handshake: {!r}".format(protocol_handshake))
         if not protocol_handshake.startswith(b'RFB 003'):
             self.log("Don't understand the protocol. Giving up.")
             # FIXME: Report the failure
-            return
-        self.protocol = protocol_handshake[4:]
+            return False
 
-        # 7.1.2. Security handshake
+        self.protocol = protocol_handshake[4:]
+        return True
+
+    def do_security(self):
+        """
+        7.1.2. Security handshake
+
+        Negotiate authentication and security protocols.
+
+        @return: True if we were successful; False if something went wrong.
+        """
+
         # Obtain all the security types suitable for this server/client
         security_types = get_security_types(self)
 
@@ -285,8 +298,7 @@ class VNCConnection(socketserver.BaseRequestHandler):
             if not response:
                 # Timeout, or disconnect
                 self.log("Timed out at Security Handshake")
-                # FIXME: Report the failure
-                return
+                return False
             self.sectype = bytearray(response)[0]
         else:
             if VNCConstants.Security_VNCAuthentication in security_types:
@@ -299,8 +311,7 @@ class VNCConnection(socketserver.BaseRequestHandler):
         self.security = security_types.get(self.sectype, None)
         if self.security is None:
             self.log("Invalid security type: {}".format(self.sectype))
-            # FIXME: Report the failure
-            return
+            return False
 
         self.log("Security: {}".format(self.security.name))
         failed = self.security.authenticate()
@@ -320,21 +331,40 @@ class VNCConnection(socketserver.BaseRequestHandler):
 
         if failed:
             self.log("Security failed, disconnecting")
-            return
+            return False
 
-        # 7.3.1. ClientInit
+        return True
+
+    def do_clientinit(self):
+        """
+        7.3.1. ClientInit
+
+        Read their requested access.
+
+        @return: True if we were successful; False if something went wrong.
+        """
         response = self.read(1, timeout=self.connect_timeout)
         if not response:
             # Timeout, or disconnect
             self.log("Timed out at ClientInit")
             # FIXME: Report the failure
-            return
+            return False
 
         (shared_flag,) = struct.unpack('B', response)
         # FIXME: Do we want to honour this or just ignore it?
-        # FIXME: Maybe report it?
+        if shared_flag == VNCConstants.ClientInit_Exclusive:
+            self.log("ClientInit: Requested exclusive access (denied, as not supported)")
 
-        # 7.3.2. ServerInit
+        return True
+
+    def do_serverinit(self):
+        """
+        7.3.2. ServerInit
+
+        Report the initial framebuffer configuration and server name.
+
+        @return: True if we were successful; False if something went wrong.
+        """
         (width, height, rows) = self.server.surface_data()
         self.width = width
         self.height = height
@@ -344,8 +374,31 @@ class VNCConnection(socketserver.BaseRequestHandler):
         data_pixelformat = self.pixelformat.encode()
         name_latin1 = name.encode('iso-8859-1')
         data_name = struct.pack('>L', len(name_latin1)) + name_latin1
+        data = data_size + data_pixelformat + data_name
         self.log("ServerInit message: %r" % (data,))
-        self.stream.writedata(data_size + data_pixelformat + data_name)
+        self.stream.writedata(data)
+
+        return True
+
+    def handle(self):
+        self.log("Connection received")
+        self.server.client_connected(self)
+
+        # 7.1.1. ProtocolVersion Handshake
+        if not self.do_protocol():
+            return
+
+        # 7.1.2. Security handshake
+        if not self.do_security():
+            return
+
+        # 7.3.1. ClientInit
+        if not self.do_clientinit():
+            return
+
+        # 7.3.2. ServerInit
+        if not self.do_serverinit():
+            return
 
         # Now we read messages from the client
         while not self.stream.closed:
