@@ -16,6 +16,16 @@ class GenericConverter(object):
     """
     A handler for generic conversion of bitmap data.
     """
+    maxshifts = {
+        1: 7,
+        3: 6,
+        7: 5,
+        15: 4,
+        31: 3,
+        63: 2,
+        127: 1,
+        255: 0
+    }
 
     def __init__(self, big_endian, bpp, pixel_format):
         self.bpp = bpp
@@ -24,6 +34,9 @@ class GenericConverter(object):
         self.in_format = ''
         self.out_format = ''
         self.pixel_format = pixel_format
+        self.in_redshift = 16 + self.maxshifts[self.pixel_format.redmax]
+        self.in_greenshift = 8 + self.maxshifts[self.pixel_format.greenmax]
+        self.in_blueshift = 0 + self.maxshifts[self.pixel_format.bluemax]
 
     def __call__(self, rowdata):
         """
@@ -51,9 +64,9 @@ class GenericConverter(object):
         in_words = struct.unpack(self.in_format, rowdata)
         out_words = []
         for word in in_words:
-            r = (word>>16) & self.pixel_format.redmax
-            g = (word>>8) & self.pixel_format.greenmax
-            b = (word>>0) & self.pixel_format.bluemax
+            r = (word >> self.in_redshift) & self.pixel_format.redmax
+            g = (word >> self.in_greenshift) & self.pixel_format.greenmax
+            b = (word >> self.in_blueshift) & self.pixel_format.bluemax
             word = ((r<<self.pixel_format.redshift) |
                     (g<<self.pixel_format.greenshift) |
                     (b<<self.pixel_format.blueshift))
