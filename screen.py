@@ -82,6 +82,6 @@ if __name__ == "__main__":
     if False:
         server = cairovnc.CairoVNCServer(port=5902, surface=screen.surface)
     else:
-        options = cairovnc.CairoVNCOptions(port=5902, password='password')
+        options = cairovnc.CairoVNCOptions(port=5902)
         server = cairovnc.CairoVNCServer(surface=screen.surface, options=options)
     server.serve_forever()

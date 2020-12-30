@@ -268,6 +268,12 @@ class VNCConnection(socketserver.BaseRequestHandler):
         # 7.1.2. Security handshake
         # Obtain all the security types suitable for this server/client
         security_types = get_security_types(self)
+
+        if not security_types:
+            # There are no security types available
+            self.log("Configuration error: No security types available, disconnecting")
+            return
+
         if self.protocol >= b'003.007':
             security_supported = sorted(security_types)  # Make the types given deterministic
             security_data = [len(security_supported)]
@@ -283,8 +289,10 @@ class VNCConnection(socketserver.BaseRequestHandler):
                 return
             self.sectype = bytearray(response)[0]
         else:
-            # FIXME: Decide which security type to declare
-            self.sectype = VNCConstants.Security_VNCAuthentication
+            if VNCConstants.Security_VNCAuthentication in security_types:
+                self.sectype = VNCConstants.Security_VNCAuthentication
+            else:
+                self.sectype = VNCConstants.Security_None
             data = struct.pack('>I', self.sectype)
             self.stream.writedata(data)
 
