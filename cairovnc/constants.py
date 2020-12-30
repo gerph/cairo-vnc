@@ -8,7 +8,7 @@ class VNCConstants(object):
 
     Security_Invalid = 0
     Security_None = 1
-    Security_VNCAuth = 2
+    Security_VNCAuthentication = 2
 
     SecurityResult_OK = 0
     SecurityResult_Failed = 1

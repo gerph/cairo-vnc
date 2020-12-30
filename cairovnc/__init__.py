@@ -24,6 +24,24 @@ from .surfacedata import SurfaceData
 from .pixeldata import PixelFormat
 from .clientmsg import dispatch_msg
 from .regions import Regions
+from .security import get_security_types
+
+
+class CairoVNCOptions(object):
+    """
+    A container object holding the options that can be set on a server and connection.
+    """
+
+    def __init__(self, host='0.0.0.0', port=5900, password=None):
+        self.host = host
+        self.port = port
+        self.password = password
+
+    def copy(self):
+        obj = CairoVNCOptions(host=self.host,
+                              port=self.port,
+                              password=self.password)
+        return obj
 
 
 class CommStream(object):
@@ -174,9 +192,6 @@ class VNCConnection(socketserver.BaseRequestHandler):
     connect_timeout = 10
     client_timeout = 10
     payload_timeout = 5
-    security_supported = [
-        VNCConstants.Security_None
-    ]
 
     def setup(self):
         self.stream = CommStream(self.request)
@@ -192,6 +207,13 @@ class VNCConnection(socketserver.BaseRequestHandler):
         self.pixelformat.redshift = 16
         self.pixelformat.greenshift = 8
         self.pixelformat.blueshift = 0
+
+        self.protocol = None
+        self.sectype = None
+        self.security = None
+
+        # We copy the options because they might be changed by security or other interaction.
+        self.options = self.server.options.copy()
 
         # The capabilities for communicating with the client
         self.capabilities = set([])
@@ -231,12 +253,15 @@ class VNCConnection(socketserver.BaseRequestHandler):
             self.log("Don't understand the protocol. Giving up.")
             # FIXME: Report the failure
             return
-        protocol = protocol_handshake[4:]
+        self.protocol = protocol_handshake[4:]
 
         # 7.1.2. Security handshake
-        if protocol >= b'003.007':
-            security_data = [len(self.security_supported)]
-            security_data.extend(self.security_supported)
+        # Obtain all the security types suitable for this server/client
+        security_types = get_security_types(self)
+        if self.protocol >= b'003.007':
+            security_supported = sorted(security_types)  # Make the types given deterministic
+            security_data = [len(security_supported)]
+            security_data.extend(security_supported)
             data = bytearray(security_data)
             self.stream.writedata(data)
 
@@ -246,26 +271,37 @@ class VNCConnection(socketserver.BaseRequestHandler):
                 self.log("Timed out at Security Handshake")
                 # FIXME: Report the failure
                 return
-            security_requested = bytearray(response)[0]
+            self.sectype = bytearray(response)[0]
         else:
+            # FIXME: Decide which security type to declare
             data = struct.pack('>I', VNCConstants.Security_None)
             self.stream.writedata(data)
-            security_requested = VNCConstants.Security_None
+            self.sectype = VNCConstants.Security_None
 
-        if security_requested != VNCConstants.Security_None:
-            self.log("Invalid security type: {}".format(security_requested))
+        self.security = security_types.get(self.sectype, None)
+        if self.security is None:
+            self.log("Invalid security type: {}".format(self.sectype))
             # FIXME: Report the failure
             return
-        # FIXME: Abstract security handling to give us a way to extend here.
+
+        failed = self.security.authenticate()
+        self.log("Security result: %r" % (failed or 'Success',))
 
         # For 'No encryption' there isn't a SecurityResult prior to 3.8
-        has_security_result = (protocol >= b'003.008')
-
+        has_security_result = (self.protocol >= b'003.008' or self.sectype != VNCConstants.Security_None)
         if has_security_result:
             # 7.1.3. SecurityResult Handshake
-            data = struct.pack('>L', VNCConstants.SecurityResult_OK)
-            self.log("Security result: %r" % (data,))
+            if failed:
+                data = struct.pack('>L', VNCConstants.SecurityResult_Failed)
+                if self.protocol >= b'003.008':
+                    data += struct.pack('>L', len(failed)) + failed.encode('iso-8859-1')
+            else:
+                data = struct.pack('>L', VNCConstants.SecurityResult_OK)
             self.stream.writedata(data)
+
+        if failed:
+            self.log("Security failed, disconnecting")
+            return
 
         # 7.3.1. ClientInit
         response = self.read(1, timeout=self.connect_timeout)
@@ -376,6 +412,7 @@ class VNCServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         self.clients = []
         self._surface_data = None
         self._display_name = None
+        self.options = kwargs.pop('options')
         self.display_name = kwargs.pop('display_name', 'cairo')
         self._surface = kwargs.pop('surface', None)
         # Can't do this on Python 2:
@@ -420,15 +457,17 @@ class VNCServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
 
 class CairoVNCServer(object):
 
-    def __init__(self, surface, host='', port=5902):
-        self.host = host
-        self.port = port
+    def __init__(self, surface, host='', port=5902, options=None):
+        if options is None:
+            options = CairoVNCOptions(host=host, port=port)
+        self.options = options
         self.surface = surface
         self.server = None
 
     def start(self):
         if not self.server:
-            self.server = VNCServer((self.host, self.port), VNCConnection, surface=self.surface)
+            self.server = VNCServer((self.options.host, self.options.port), VNCConnection,
+                                    surface=self.surface, options=self.options)
 
     def serve_forever(self):
         self.start()
