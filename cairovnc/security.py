@@ -119,8 +119,8 @@ class SecurityVNCAuthentication(SecurityBase):
             # We cannot authenticate without encryption using the des library
             return False
 
-        # We can provide authenticated access with an empty password.
-        return True
+        # We're only activating this authentication if there is a password set
+        return bool(self.server.options.password)
 
     def authenticate(self):
         challenge = get_challenge(16)
