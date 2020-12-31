@@ -102,17 +102,31 @@ class CommStream(object):
         """
         Read data from the socket - may be overridden to decrypt the data from the wire
         """
+        if self.closed:
+            # If the connection was closed; we didn't get any data
+            return b''
         return self.sock.recv(nbytes)
 
     def writedata(self, data):
         """
         Write data to the socket - may be overridden to encrypt the data on the wire
         """
+        if self.closed:
+            return
         #self.log("Sending %r" % (data,))
-        self.sock.send(data)
+        try:
+            self.sock.send(data)
+        except Exception:
+            # Any failure here is almost certainly fatal; mark the connection as closed
+            self.closed = True
 
     def fionread(self):
+        if self.closed:
+            # If we were closed, then report that we have no data
+            return -1
         if fcntl.ioctl(self.sock, termios.FIONREAD, self.fionread_data) == -1:
+            # Any error means the connection is closed
+            self.closed = True
             return -1
         return struct.unpack('I', self.fionread_data)[0]
 
@@ -141,14 +155,14 @@ class CommStream(object):
         else:
             current_data = b''
 
-        while True:
+        while not self.closed:
             timeout = endtime - time.time()
             if timeout <= 0:
                 break
             (rlist, wlist, xlist) = select.select([self.sock], [], [], timeout)
             if rlist:
                 nbytes = self.fionread()
-                if nbytes == 0:
+                if nbytes <= 0:
                     self.closed = True
                     break
                 current_data += self.readdata(nbytes)
@@ -175,7 +189,7 @@ class CommStream(object):
             timeout = self.default_timeout
         endtime = time.time() + timeout
         data = []
-        while True:
+        while not self.closed:
             timeout = endtime - time.time()
             if timeout <= 0:
                 break
@@ -200,7 +214,7 @@ class CommStream(object):
             (rlist, wlist, xlist) = select.select([self.sock], [], [], timeout)
             if rlist:
                 nbytes = self.fionread()
-                if nbytes == 0:
+                if nbytes <= 0:
                     # Connection was closed
                     self.closed = True
                     break
