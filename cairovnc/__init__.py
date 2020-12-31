@@ -23,6 +23,7 @@ except ImportError:
 import termios
 import threading
 import time
+import traceback
 
 from .constants import VNCConstants
 from .surfacedata import SurfaceData
@@ -312,6 +313,15 @@ class VNCConnection(socketserver.BaseRequestHandler):
     def log(self, message):
         self.server.client_log(self, message)
 
+    def log_exception(self, exc):
+        """
+        An exception occurred during processing; log any details necessary.
+        """
+        self.log("Exception: {}: {}".format(exc.__class__.__name__,
+                                            exc))
+        for line in traceback.format_exc().splitlines():
+            self.log(line)
+
     def do_protocol(self):
         """
         7.1.1 ProtocolVersion Handshake
@@ -449,7 +459,12 @@ class VNCConnection(socketserver.BaseRequestHandler):
     def handle(self):
         self.log("Connection received")
         self.server.client_connected(self)
+        try:
+            self.do_vnc_protocol()
+        except Exception as exc:
+            self.log_exception(exc)
 
+    def do_vnc_protocol(self):
         # 7.1.1. ProtocolVersion Handshake
         if not self.do_protocol():
             return
