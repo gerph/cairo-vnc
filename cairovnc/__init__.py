@@ -17,6 +17,7 @@ except ImportError:
     # Python 2 compatibility.
     import SocketServer as socketserver
 import termios
+import threading
 import time
 
 from .constants import VNCConstants
@@ -556,7 +557,9 @@ class VNCServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         self.options = kwargs.pop('options')
         self.display_name = kwargs.pop('display_name', 'cairo')
         self.surface = kwargs.pop('surface', None)
-        self.surface_lock = kwargs.pop('surface_lock', None)
+        self.surface_lock = kwargs.pop('surface_lock', NullLock())
+        self.surface_data_lock = threading.Lock()
+
         # Can't do this on Python 2:
         #super(VNCServer, self).__init__(*args, **kwargs)
         socketserver.TCPServer.__init__(self, *args, **kwargs)
@@ -582,30 +585,31 @@ class VNCServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         print("Client: {}".format(message))
 
     def surface_data(self):
-        if not self._surface_data:
-            print("Updating surface_data")
-            self._surface_data = SurfaceData(self.surface, max_framerate=self.options.max_framerate)
-        return self._surface_data.get_data()
+        with self.surface_data_lock:
+            if not self._surface_data:
+                self._surface_data = SurfaceData(self.surface, self.surface_lock,
+                                                 max_framerate=self.options.max_framerate)
+            return self._surface_data.get_data()
 
     def surface_size(self):
-        if not self._surface_data:
-            print("Updating surface_data")
-            self._surface_data = SurfaceData(self.surface, max_framerate=self.options.max_framerate)
-        return self._surface_data.get_size()
+        with self.surface_data_lock:
+            if not self._surface_data:
+                self._surface_data = SurfaceData(self.surface, self.surface_lock,
+                                                 max_framerate=self.options.max_framerate)
+            return self._surface_data.get_size()
 
     def change_surface(self, surface, surface_lock):
-        print("change_surface")
-        self.surface_lock = surface_lock or NullLock()
+        with self.surface_data_lock:
+            self.surface_lock = surface_lock or NullLock()
 
-        if self.surface == surface:
-            # No change, so don't perform any update and don't invalidate the data
-            return
+            if self.surface == surface:
+                # No change, so don't perform any update and don't invalidate the data
+                return
 
-        self.surface = surface
-        self._surface_data = None
+            self.surface = surface
+            self._surface_data = None
 
-        # Notify all clients that the display has changed
-        print("Surface changing ({} clients)".format(len(self.clients)))
+        # Notify all clients that the surface has changed
         for client in self.clients:
             client.change_surface()
 

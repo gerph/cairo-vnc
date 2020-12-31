@@ -23,17 +23,26 @@ class SurfaceData(object):
     a different format. A single format makes it easier to share between them.
     """
 
-    def __init__(self, surface, max_framerate=10):
+    def __init__(self, surface, lock, max_framerate=10):
+        """
+        Construct an object access to the data on the surface.
+
+        @param surface:         The surface we're getting information on
+        @param lock:            A lock to use when accessing the surface
+        @param max_framerate:   Maximum speed at which data will be returned
+        """
         self.surface = surface
-        self.width = 0
-        self.height = 0
+        self.lock = lock
         self.data = None
         self.last_data_time = 0
         self._max_framerate = 1
         self._min_period = 1
-        # FIXME: Locking
 
         self.max_framerate = max_framerate
+
+        with self.lock:
+            self.width = self.surface.get_width()
+            self.height = self.surface.get_height()
 
     @property
     def max_framerate(self):
@@ -57,9 +66,7 @@ class SurfaceData(object):
         """
         Retrieve just the size of the surface
         """
-        width = self.surface.get_width()
-        height = self.surface.get_height()
-        return (width, height)
+        return (self.width, self.height)
 
     def get_data(self):
         """
@@ -72,45 +79,42 @@ class SurfaceData(object):
             # This is a request within the frame period, so return the last data we got
             return (self.width, self.height, self.data)
 
-        data_format = self.surface.get_format()
-        data = self.surface.get_data()
-        width = self.surface.get_width()
-        height = self.surface.get_height()
-        stride = self.surface.get_stride()
+        with self.lock:
+            data_format = self.surface.get_format()
+            data = self.surface.get_data()
+            stride = self.surface.get_stride()
 
-        if data_format == cairo.FORMAT_RGB24:
-            def converter(row):
-                return bytes(row)
+            if data_format == cairo.FORMAT_RGB24:
+                def converter(row):
+                    return bytes(row)
 
-        elif data_format == cairo.FORMAT_ARGB32:
-            def converter(row):
-                # FIXME: Not quite correct; as this leaves the alpha channel in the 4th byte.
-                return bytes(row)
-        else:
-            # Unrecognised format.
-            raise CairoVNCBadSurfaceFormatError("Cairo surface format {} is not supported".format(data_format))
-
-        # We split the returned data into rows as this will be easier for the clients to
-        # compare and render only the changes.
-        row_data = []
-        lastdata = 0    # The prior row's input data
-        lastrow = 0     # The prior row's converted data
-        for y in range(height):
-            offset = y * stride
-            row = data[offset:offset + stride]
-            if row == lastdata:
-                # If it's actually the same as the prior row, then make it the same object
-                row = lastrow
+            elif data_format == cairo.FORMAT_ARGB32:
+                def converter(row):
+                    # FIXME: Not quite correct; as this leaves the alpha channel in the 4th byte.
+                    return bytes(row)
             else:
-                # Copy the data (because the buffer object or memoryview will change after we return)
-                lastdata = row
-                row = converter(row)
-                lastrow = row
-            row_data.append(row)
+                # Unrecognised format.
+                raise CairoVNCBadSurfaceFormatError("Cairo surface format {} is not supported".format(data_format))
 
-        self.width = width
-        self.height = height
-        self.data = row_data
+            # We split the returned data into rows as this will be easier for the clients to
+            # compare and render only the changes.
+            row_data = []
+            lastdata = 0    # The prior row's input data
+            lastrow = 0     # The prior row's converted data
+            for y in range(self.height):
+                offset = y * stride
+                row = data[offset:offset + stride]
+                if row == lastdata:
+                    # If it's actually the same as the prior row, then make it the same object
+                    row = lastrow
+                else:
+                    # Copy the data (because the buffer object or memoryview will change after we return)
+                    lastdata = row
+                    row = converter(row)
+                    lastrow = row
+                row_data.append(row)
+
+            self.data = row_data
 
         # It may have taken a long time to process this data, so we'll reset the time
         # it was fetched to the end of the fetch.

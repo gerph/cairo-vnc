@@ -1,6 +1,7 @@
 # CairoVNC - VNC server for Cairo surfaces
 
 ## Introduction
+
 This repository holds an implementation of a VNC server that can supply the contents of a
 PyCairo surface to multiple clients.
 
@@ -47,3 +48,15 @@ The following example is similar to the basic example, above, but every 2 second
 surface is changed in size.
 
     python example_new_surface.py
+
+### Thread safety
+
+Whilst the surface is being updated by the animation thread, the surface might need to
+be supplied to a VNC client. In the prior examples, there was no consideration for this,
+which might mean that partial frame content was delivered to the VNC clients. To prevent
+this from happening, it is possible to use a lock around updates to the surface. This
+ensures that only whole frames are delivered to the client.
+
+The following example adds this locking to the surfaces.
+
+    python example_locking.py
