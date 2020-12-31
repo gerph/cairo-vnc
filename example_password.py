@@ -1,14 +1,12 @@
 """
-Show how to lock access so that partial frames are not delivered.
+Show how to provide a password for the server.
 
 Run a simple animation in the Cairo surface, on a thread.
 Then run a server on localhost:5902 / localhost:2 which should display the animation.
 
-Here we use a thread to lock access to the surface whilst it's being updated.
-These locks ensure that the threads which are supplying data to the VNC clients
-do not attempt to access the surface data whilst a frame is being constructed.
-This would have undefined behaviour for Cairo, with the best result being that partial
-frames would be delivered to the client.
+A password is specified for access to the server; two passwords can be
+given - a regular password, and a password which forces the connection
+to be read only (no input).
 """
 
 import math
@@ -66,17 +64,14 @@ class Screen(object):
         self.context.line_to(x3, y3)
         self.context.stroke()
 
-        # Red square
         self.context.set_source_rgb(1, 0, 0)
         self.context.rectangle(0.1, 0 + delta * 0.05, 0.1, 0.1)
         self.context.fill()
 
-        # Green square
         self.context.set_source_rgb(0, 1, 0)
         self.context.rectangle(0.3, 0, 0.1, 0.1)
         self.context.fill()
 
-        # Blue square
         self.context.set_source_rgb(0, 0, 1)
         self.context.rectangle(0.5, 0, 0.1, 0.1)
         self.context.fill()
@@ -111,7 +106,8 @@ animate_thread.start()
 
 if __name__ == "__main__":
     # Create the server with options
-    options = cairovnc.CairoVNCOptions(port=5902)
+    options = cairovnc.CairoVNCOptions(port=5902, password='password', password_readonly='readonly')
+
     server = cairovnc.CairoVNCServer(surface=screen.surface, surface_lock=screen.surface_lock,
                                      options=options)
 

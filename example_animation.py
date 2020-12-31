@@ -1,8 +1,11 @@
 """
-Test that the VNC server works.
+Show a simple animation.
 
 Run a simple animation in the Cairo surface, on a thread.
 Then run a server on localhost:5902 / localhost:2 which should display the animation.
+
+The animation runs on a thread, moving one point of the bezier curve and a square
+on each frame.
 """
 
 import math
@@ -14,6 +17,7 @@ import cairo
 import cairovnc
 
 class Screen(object):
+    animation_period = 0.1
     def __init__(self):
         self.width = 200
         self.height = 200
@@ -21,7 +25,6 @@ class Screen(object):
 
         self.surface = cairo.ImageSurface(cairo.Format.ARGB32, self.width, self.height)
         self.context = cairo.Context(self.surface)
-        self.draw()
 
     def draw(self):
         self.context.set_source_rgb(0.5, 0.5, 0.5)
@@ -35,12 +38,15 @@ class Screen(object):
         x, y, x1, y1 = 0.1, 0.5, 0.4, 0.5 + delta * 0.4
         x2, y2, x3, y3 = 0.6, 0.1, 0.9, 0.5
         self.context.save()
-        self.context.scale(200, 200)
+        self.context.scale(self.width, self.height)
+
+        # Bezier curve
         self.context.set_line_width(0.04)
         self.context.move_to(x, y)
         self.context.curve_to(x1, y1, x2, y2, x3, y3)
         self.context.stroke()
 
+        # Control points
         self.context.set_source_rgba(1, 0.2, 0.2, 0.6)
         self.context.set_line_width(0.02)
         self.context.move_to(x, y)
@@ -49,14 +55,17 @@ class Screen(object):
         self.context.line_to(x3, y3)
         self.context.stroke()
 
+        # Red square
         self.context.set_source_rgb(1, 0, 0)
         self.context.rectangle(0.1, 0 + delta * 0.05, 0.1, 0.1)
         self.context.fill()
 
+        # Green square
         self.context.set_source_rgb(0, 1, 0)
         self.context.rectangle(0.3, 0, 0.1, 0.1)
         self.context.fill()
 
+        # Blue square
         self.context.set_source_rgb(0, 0, 1)
         self.context.rectangle(0.5, 0, 0.1, 0.1)
         self.context.fill()
@@ -66,7 +75,7 @@ class Screen(object):
 
     def animate(self):
         while True:
-            time.sleep(0.1)
+            time.sleep(self.animation_period)
             self.draw()
             self.seq += 1
 

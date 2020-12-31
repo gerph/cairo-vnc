@@ -104,7 +104,7 @@ class SecurityBase(object):
 class SecurityNone(SecurityBase):
 
     def enabled(self):
-        return not self.server.options.password
+        return not (self.server.options.password or self.server.options.password_readonly)
 
     def authenticate(self):
         # No security, so we're successful!
@@ -120,36 +120,50 @@ class SecurityVNCAuthentication(SecurityBase):
             return False
 
         # We're only activating this authentication if there is a password set
-        return bool(self.server.options.password)
+        return bool(self.server.options.password or self.server.options.password_readonly)
 
     def authenticate(self):
         challenge = get_challenge(16)
         self.server.write(challenge)
 
-        password = self.server.options.password or ''
-        # FIXME: I've chosen to use ISO 8859-1 for the password here because that's what the rest of the spec
-        #        uses for strings.
-        password = password.encode('iso-8859-1')
-
-        # Truncate and pad to 8 characters
-        password_padded = password[:8]
-        password_padded += b'\x00' * (8 - len(password_padded))
-        password_reversed = invert_password(password_padded)
-
-        # encrypt
-        expect = des_encrypt(key=password_reversed, value=challenge)
         response = self.server.read(16, timeout=self.server.security_timeout)
         if not response:
             return "Timed out/connection closed during VNC authentication"
 
-        self.log("challenge=%r" % (challenge,))
-        self.log("password_padded=%r" % (password_padded,))
-        self.log("password_reversed=%r" % (password_reversed,))
-        self.log("expected=%r" % (expect,))
-        self.log("received=%r" % (response,))
+        # Check against both the regular password and the readonly password
+        password_accepted = None
+        for password in (self.server.options.password, self.server.options.password_readonly):
+            if not password:
+                continue
 
-        if expect != response:
+            # FIXME: I've chosen to use ISO 8859-1 for the password here because that's what the rest of the spec
+            #        uses for strings.
+            password_encoded = password.encode('iso-8859-1')
+
+            # Truncate and pad to 8 characters
+            password_padded = password_encoded[:8]
+            password_padded += b'\x00' * (8 - len(password_padded))
+            password_reversed = invert_password(password_padded)
+            expect = des_encrypt(key=password_reversed, value=challenge)
+
+            if False:
+                # If you need to debug what's going on with these encryptions, enable this code
+                self.log("challenge=%r" % (challenge,))
+                self.log("password_padded=%r" % (password_padded,))
+                self.log("password_reversed=%r" % (password_reversed,))
+                self.log("expected=%r" % (expect,))
+                self.log("received=%r" % (response,))
+
+            if expect == response:
+                password_accepted = password
+
+        if not password_accepted:
             return "Authentication by VNC Authentication failed"
+
+        # If they supplied the 'read only' password, we need to tweak the options.
+        if password_accepted == self.server.options.password_readonly:
+            self.server.options.read_only = True
+            self.log("Access downgraded to 'read only'")
 
         return None
 

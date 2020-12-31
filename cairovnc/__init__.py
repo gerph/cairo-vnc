@@ -9,6 +9,10 @@ Usage:
 
 import array
 import fcntl
+try:
+    import queue
+except ImportError:
+    import Queue as queue
 import select
 import struct
 try:
@@ -31,24 +35,47 @@ from .security import get_security_types
 class CairoVNCOptions(object):
     """
     A container object holding the options that can be set on a server and connection.
+
+    Simple options are available on the constructor. More advanced options are properties.
     """
 
-    def __init__(self, host='0.0.0.0', port=5900, password=None):
+    def __init__(self, host='0.0.0.0', port=5900, password=None, password_readonly=None):
         self.host = host
         self.port = port
 
         # Set password to None to allow any connections (although the macOS screen sharing
         # hangs if you do this).
         self.password = password
+        # A dedicated password that allows readonly access
+        self.password_readonly = password_readonly
 
         # The maximum speed at which we will deliver frame updates, regardless of what the
         # clients request.
         self.max_framerate = 10
 
+        # Whether the access is read-only, or allows input events
+        # We default to read_only, so that simple uses of the client don't end up blocking
+        # when the queue becomes full.
+        # But if they explicitly set both types of password, then they wanted a differentiated
+        # server, so we clear the readonly flag.
+        self.read_only = True ^ bool(password and password_readonly)
+
+        # How many events we'll allow to queue before blocking (use 0 for infinite)
+        # The default here is enough that it should not block too quickly, and small
+        # enough that we don't gobble memory.
+        self.event_queue_length = 500
+
     def copy(self):
         obj = CairoVNCOptions(host=self.host,
                               port=self.port,
-                              password=self.password)
+                              password=self.password,
+                              password_readonly=self.password_readonly)
+
+        # Copy the less common options
+        obj.max_framerate = self.max_framerate
+        obj.read_only = self.read_only
+        obj.event_queue_length = self.event_queue_length
+
         return obj
 
 
@@ -233,6 +260,11 @@ class VNCConnection(socketserver.BaseRequestHandler):
         self.protocol = None
         self.sectype = None
         self.security = None
+
+        # Button states
+        self.pointer_buttons = 0
+        self.pointer_xpos = -1
+        self.pointer_ypos = -1
 
         # We copy the options because they might be changed by security or other interaction.
         self.options = self.server.options.copy()
@@ -525,6 +557,12 @@ class VNCConnection(socketserver.BaseRequestHandler):
         msg = b''.join(msg_data)
         self.write(msg)
 
+    def queue_event(self, event):
+        """
+        Insert an event into the queue for the animator.
+        """
+        self.server.event_queue.put(event)
+
     def change_surface(self):
         """
         The display surface has changed, so we might need to issue a DesktopSize.
@@ -559,6 +597,8 @@ class VNCServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         self.surface = kwargs.pop('surface', None)
         self.surface_lock = kwargs.pop('surface_lock', NullLock())
         self.surface_data_lock = threading.Lock()
+
+        self.event_queue = queue.Queue(self.options.event_queue_length)
 
         # Can't do this on Python 2:
         #super(VNCServer, self).__init__(*args, **kwargs)
@@ -629,6 +669,7 @@ class VNCServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
 class CairoVNCServer(object):
     # The class to use for connections (override if you are subclassing)
     connection_class = VNCConnection
+    event_polling_period = 0.5
 
     def __init__(self, surface, host='', port=5902, surface_lock=None, options=None):
         if options is None:
@@ -661,7 +702,7 @@ class CairoVNCServer(object):
         self.start()
         self.server.serve_forever()
         self.server.server_close()
-        self.serevr = None
+        self.server = None
 
     def daemonise(self):
         self.thread = threading.Thread(target=self.serve_forever)
@@ -673,3 +714,50 @@ class CairoVNCServer(object):
             self.surface = surface
             self.surface_lock = surface_lock
             self.server.change_surface(surface, surface_lock)
+
+    def get_event(self, timeout=None):
+        """
+        Read an event from the queue, potentially with a timeout.
+
+        @param timeout:     Timeout, in seconds, for reading an event, or None to wait forever
+
+        @return: VNCEvent object (see events.py) or None if no event was pending
+        """
+        server = self.server
+        if not server:
+            return None
+
+        if timeout is None:
+            # Wait forever (or until the server is stopped) for an event
+            event = None
+            while self.server:
+                try:
+                    event = server.event_queue.get(True, self.event_polling_period)
+                except queue.Empty:
+                    # There was nothing present; so we just keep waiting.
+                    pass
+            return event
+
+        if timeout <= 0:
+            # They just wanted to get a single event, if there was one.
+            try:
+                event = server.event_queue.get(False)
+            except queue.Empty:
+                # No event was pending, so return None
+                return None
+
+        # They wanted to get an event with a timeout; we need to terminate ourselves
+        # if the server is terminated, so we need to do more work here.
+        end = time.time() + timeout
+        event = None
+        while not event and self.server:
+            timeout = end - time.time()
+            if timeout <= 0:
+                break
+            try:
+                event = server.event_queue.get(True, min(timeout, self.event_polling_period))
+            except queue.Empty:
+                # No event yet; so keep going.
+                pass
+
+        return event

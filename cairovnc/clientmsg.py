@@ -6,6 +6,7 @@ import struct
 
 from .constants import VNCConstants
 from .regions import RegionRequest
+from .events import VNCEventMove, VNCEventClick, VNCEventKey
 
 
 message_handlers = {}
@@ -40,7 +41,7 @@ def dispatch_msg(msgtype, server):
 
 
 @register_msg(VNCConstants.ClientMsgType_SetPixelFormat, payload_size=3 + 16)
-def msg_SetPixelTormat(server, payload):
+def msg_SetPixelFormat(server, payload):
     server.pixelformat.decode(payload[3:])
     server.log("SetPixelFormat: %r" % (server.pixelformat,))
 
@@ -70,13 +71,28 @@ def msg_FramebufferUpdateRequest(server, payload):
 @register_msg(VNCConstants.ClientMsgType_KeyEvent, payload_size=1 + 2 + 4)
 def msg_KeyEvent(server, payload):
     (down, _, key) = struct.unpack('>BHL', payload)
-    server.log("KeyEvent: key=%i, down=%i" % (key, down))
+    if not server.options.read_only:
+        server.log("KeyEvent: key=%i, down=%i" % (key, down))
+        server.queue_event(VNCEventKey(key, down))
 
 
 @register_msg(VNCConstants.ClientMsgType_PointerEvent, payload_size=1 + 2 * 2)
 def msg_PointerEvent(server, payload):
     (buttons, xpos, ypos) = struct.unpack('>BHH', payload)
-    server.log("PointerEvent: buttons=%i, pos=%i,%i" % (buttons, xpos, ypos))
+    if not server.options.read_only:
+        server.log("PointerEvent: buttons=%i, pos=%i,%i" % (buttons, xpos, ypos))
+
+        # We want to be able to discard movement events and report clicks separately
+        # First we deliver any movement events.
+        if xpos != server.pointer_xpos or ypos != server.pointer_ypos:
+            server.queue_event(VNCEventMove(xpos, ypos, buttons))
+        diff = server.pointer_buttons ^ buttons
+        if diff:
+            # Buttons changed, so we need to deliver click or release events
+            for button in range(0, 8):
+                bit = (1<<button)
+                if diff & bit:
+                    server.queue_event(VNCEventClick(xpos, ypos, button, buttons & bit))
 
 
 @register_msg(VNCConstants.ClientMsgType_ClientCutText, payload_size=3 + 4)
@@ -86,5 +102,7 @@ def msg_ClientCutText(server, payload):
     if not response:
         server.log("Timeout reading ClientCutText data (2)")
         return
-    text = response.decode('iso-8859-1')
-    server.log("ClientCutText: textlen=%i, text=%r" % (textlen, text))
+    if not server.options.read_only:
+        text = response.decode('iso-8859-1')
+        server.log("ClientCutText: textlen=%i, text=%r" % (textlen, text))
+        # FIXME: Deliver this data

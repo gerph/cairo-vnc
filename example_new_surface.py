@@ -1,8 +1,12 @@
 """
-Test that we can change the surface, and its size, as we go.
+Demonstrate that we can change the surface, and its size, as we go.
 
 Run a simple animation in the Cairo surface, on a thread.
 Then run a server on localhost:5902 / localhost:2 which should display the animation.
+
+Every 20 frames, the surface is recreated at a different size.
+Each time it is recreated, we must notify the VNC server of the
+new surface object.
 """
 
 import math
@@ -22,7 +26,6 @@ class Screen(object):
         self.height = 200
         self.seq = 0
         self.setup_surface()
-        self.draw()
 
     def setup_surface(self):
         self.surface = cairo.ImageSurface(cairo.Format.ARGB32, self.width, self.height)
@@ -43,11 +46,14 @@ class Screen(object):
         x2, y2, x3, y3 = 0.6, 0.1, 0.9, 0.5
         self.context.save()
         self.context.scale(self.width, self.height)
+
+        # Bezier curve
         self.context.set_line_width(0.04)
         self.context.move_to(x, y)
         self.context.curve_to(x1, y1, x2, y2, x3, y3)
         self.context.stroke()
 
+        # Control points
         self.context.set_source_rgba(1, 0.2, 0.2, 0.6)
         self.context.set_line_width(0.02)
         self.context.move_to(x, y)
@@ -56,14 +62,17 @@ class Screen(object):
         self.context.line_to(x3, y3)
         self.context.stroke()
 
+        # Red square
         self.context.set_source_rgb(1, 0, 0)
         self.context.rectangle(0.1, 0 + delta * 0.05, 0.1, 0.1)
         self.context.fill()
 
+        # Green square
         self.context.set_source_rgb(0, 1, 0)
         self.context.rectangle(0.3, 0, 0.1, 0.1)
         self.context.fill()
 
+        # Blue square
         self.context.set_source_rgb(0, 0, 1)
         self.context.rectangle(0.5, 0, 0.1, 0.1)
         self.context.fill()
