@@ -80,8 +80,11 @@ server.stop()
 
 Events from the remote connection are delivered to a queue and can be retrieved by calling the
 `get_event` method. This method takes a timeout to allow it to poll for a period or to return
-immediately. The events that are delivered will depend on the client's capabilities. Not all events will be of interest to the animator. The event type can be recognised either by checking
-the type of `VNCEvent` instance that has been supplied, or examining the `name` property of the event.
+immediately. The events that are delivered will depend on the client's capabilities. Not all
+events will be of interest to the animator. The event type can be recognised either by checking
+the type of `VNCEvent` instance that has been supplied, or examining the `name` property of the
+event. All events have a `timestamp` object which contains the `time.time()` value when the event
+was queued.
 
 There are currently 3 events which can be delivered:
 
@@ -168,6 +171,14 @@ be moved with the pointer, and changing the colour of the squares when the mouse
 buttons are clicked.
 
     python example_input.py
+
+### Verbose logging
+
+Whilst debugging, and during development, it is often useful to know what has
+happened for each client. This is internally handled through the `client_log` methods
+in the server, and can be exposed by enabling the `verbose` option.
+
+    python example_verbose.py
 
 ### Desktop name
 

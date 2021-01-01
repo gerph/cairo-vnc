@@ -74,6 +74,9 @@ class CairoVNCOptions(object):
         # enough that we don't gobble memory.
         self.event_queue_length = 500
 
+        # Whether we're giving log output of what's happening
+        self.verbose = False
+
     def copy(self):
         obj = CairoVNCOptions(host=self.host,
                               port=self.port,
@@ -86,6 +89,7 @@ class CairoVNCOptions(object):
         obj.max_framerate = self.max_framerate
         obj.read_only = self.read_only
         obj.event_queue_length = self.event_queue_length
+        obj.verbose = self.verbose
 
         return obj
 
@@ -785,8 +789,9 @@ class VNCServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
 
         @return: True to accept the connection; False to drop it
         """
-        with self.client_lock:
+        if self.options.verbose:
             print("Client connected")
+        with self.client_lock:
             if len(self.clients) == self.options.max_clients:
                 # There are already the maximum number of clients connected.
                 # We're going to drop this connection.
@@ -803,8 +808,9 @@ class VNCServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
 
         @param client:  Client connection object
         """
-        with self.client_lock:
+        if self.options.verbose:
             print("Client disconnected")
+        with self.client_lock:
             self.clients.remove(client)
 
     def client_log(self, client, message):
@@ -816,7 +822,8 @@ class VNCServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         @param client:  Client connection object
         @param message: Message string
         """
-        print("Client: {}".format(message))
+        if self.options.verbose:
+            print("Client: {}".format(message))
 
     def surface_data(self):
         """

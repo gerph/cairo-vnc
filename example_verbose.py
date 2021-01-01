@@ -1,14 +1,12 @@
 """
-Show we can read input events from the connected clients.
+Demonstrate the logging provided when 'verbose' is enabled.
 
 Run a simple animation in the Cairo surface, on a thread.
 Then run a server on localhost:5902 / localhost:2 which should display the animation.
 
-Instead of just sleeping during the animation delay, we now pull events from the
-VNC server. These events are then used to control the shapes in the animation.
-The pointer position controls one of the bezier control points.
-The mouse clicks control cycling of colours of the squares (for the first 3
-buttons).
+The clients log information to a method in the server. This could be overridden to
+provide different types of logging. By default, however, it's turned off. The 'verbose'
+option allows this logging to be shown.
 """
 
 import math
@@ -143,6 +141,7 @@ if __name__ == "__main__":
     # Create the server with options
     options = cairovnc.CairoVNCOptions(port=5902)
     options.read_only = False
+    options.verbose = True
     server = cairovnc.CairoVNCServer(surface=screen.surface, surface_lock=screen.surface_lock,
                                      options=options)
     screen.get_event = server.get_event
