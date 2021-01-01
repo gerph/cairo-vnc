@@ -6,7 +6,7 @@ This repository holds an implementation of a VNC server that can supply the cont
 PyCairo surface to multiple clients.
 
 Currently a work in progress, it is intended to incorporate most of the simple features of
-VNC screen and the keyboard and mouse input.
+VNC screen, together with the keyboard and mouse input.
 
 The code is intentionally compatible between Python 2 and Python 3.
 
@@ -15,14 +15,89 @@ The code is intentionally compatible between Python 2 and Python 3.
 The code for the VNC server is all in the `cairovnc` directory. It'll be at varying degrees
 of completeness as time goes on.
 
-No test suites as yet.
+### Structure
 
-To test it by hand:
+The CairoVNC package is structured such that users of the system (the 'animator', within this
+documentation) should usually only access the CairoVNCServer and CairoVNCOptions objects.
+The 'animator' controls the Cairo surface, and the CairoVNCServer object manages the server
+and its connections.
 
-    python example_animation.py
+The CairoVNCServer provides a VNC server which will spawn a new thread for each connection.
+These connections may come and go, and their updates will be managed by the CairoVNCServer
+system. The connections may supply events (such as mouse operations and key presses) to
+the animator through a thread safe queue whcih it may consume.
 
-then connect to VNC display 2 (sometimes listed as port 5902, rather than display 2) on
-localhost.
+The animator may prevent access to the surface it is updating through a thread lock to prevent
+unsafe operations and incomplete frames.
+
+### Creating a server
+
+The CairoVNC server can be created with the `cairovnc.CairoVNCServer` object creation. This
+object takes the surface which should be used as the only required parameter. It also
+takes a number of optional named parameters which are commonly used:
+
+* `host` and `port`: Supplies the address and port that the server should listen on.
+* `surface_lock`: Supplies a `threading.Lock` object which will be used around all access to the surface.
+* `options`: Supplies a `cairovnc.CairoVNCOptions` object which provides all the other exposed configurables.
+
+Creating the `CairoVNCServer` object does not begin listening immediately. The server can be
+started and stopped under the control of the animator system. The server can run in one of three
+models:
+
+* Daemonised: This model is activated by using the `daemonise` method. This will start a separate thread for the server. It will run until the process exits, or the `stop` method is called (from another thread).
+* Blocking: This model is activated by using the `serve_forever` method. This will start the server on the current thread. It will run until the `stop` method is called (from another thread).
+* Polled: This model is activated by using the `start` method to start the server listening, and must then be polled for connections with the `poll` method. The `poll` method can block for a period or return immediately. When the server is no longer needed the `stop` method should be called.
+
+It is not expected that the Polled model be used often; the Daemonised and Blocking models are more likely to be useful to users.
+
+The basic creation of a server might be thus:
+
+```
+server = cairovnc.CairoVNCServer(port=5900, surface=surface)
+server.serve_forever()
+```
+
+The more advanced cases may create an options object, and place the server into a separate thread
+to run.
+
+```
+options = cairovnc.CairoVNCOptions(port=5900, password='secret')
+options.max_clients = 20
+
+server = cairovnc.CairoVNCServer(surface=surface, surface_lock=surface_lock,
+                                 options=options)
+server.daemonise()
+
+while still_animating:
+    with surface_lock:
+        render_frame()
+    time.sleep(frame_period)
+
+server.stop()
+```
+
+### Events
+
+Events from the remote connection are delivered to a queue and can be retrieved by calling the
+`get_event` method. This method takes a timeout to allow it to poll for a period or to return
+immediately. The events that are delivered will depend on the client's capabilities. Not all events will be of interest to the animator. The event type can be recognised either by checking
+the type of `VNCEvent` instance that has been supplied, or examining the `name` property of the event.
+
+There are currently 3 events which can be delivered:
+
+* `VNCEventKey`: (name `key`) \
+This event delivers a key press or release event.
+    * Property `key`: Contains the VNC key symbol codes for the event. These are largely the ASCII codes with some special values for control keys. Consult the `events.py` source for these constants.
+    * Property `down`: `True` if the event is for a key press, `False` if the event is for a key release. The event may be retriggered if auto-repeat is enabled on the client system, resulting in multiple `True` events being delivered before a `False` indicates the release.
+* `VNCEventMove`: (name `move`) \
+This event delivers a pointer movement.
+    * Property `x`, `y`: Contains the coordinates of the pointer within the frame buffer, as positive pixel offsets from the top left corner.
+    * Property `buttons`: Contains a bitmask of the mouse buttons which are currently active. Bit 0 corresponds to the first mouse button. Protocol limitations mean that only the first 8 buttons will be delivered reliably by this event.
+* `VNCEventClick`: (name `click`) \
+This event delivers a pointer click or release; it is the pointer analogue of the key event.
+    * Property `x`, `y`: Contains the coordinates of the pointer within the frame buffer, as positive pixel offsets from the top left corner.
+    * Property `button`: Contains the mouse button number, starting from 0 for the first button.
+    * Property `down`: `True` if the event is for a click, `False` if the event is for a release.
 
 ## Examples
 
@@ -105,3 +180,7 @@ Support for changing the deslktop name is not universal, and some clients will
 remain with the name which was initially delivered.
 
     python example_name.py
+
+## Testing
+
+There are no test suites as yet. It's all manually tested, I'm afraid.

@@ -88,9 +88,5 @@ animate_thread.start()
 
 if __name__ == "__main__":
     # Create the server
-    if False:
-        server = cairovnc.CairoVNCServer(port=5902, surface=screen.surface)
-    else:
-        options = cairovnc.CairoVNCOptions(port=5902)
-        server = cairovnc.CairoVNCServer(surface=screen.surface, options=options)
+    server = cairovnc.CairoVNCServer(port=5902, surface=screen.surface)
     server.serve_forever()
