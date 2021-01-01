@@ -52,7 +52,7 @@ class CairoVNCOptions(object):
 
         # The maximum speed at which we will deliver frame updates, regardless of what the
         # clients request.
-        self.max_framerate = 10
+        self.max_framerate = 20
 
         # Whether the access is read-only, or allows input events
         # We default to read_only, so that simple uses of the client don't end up blocking
@@ -290,8 +290,12 @@ class VNCConnection(socketserver.BaseRequestHandler):
 
         # The capabilities for communicating with the client
         self.capabilities = set([])
+
+        # FrameUpdate variables
         self.request_regions = Regions()
         self.last_rows = {}
+        self.min_frame_period = 1.0 / self.options.max_framerate
+        self.last_frameupdate_time = 0
 
     def finish(self):
         self.server.client_disconnected(self)
@@ -483,7 +487,12 @@ class VNCConnection(socketserver.BaseRequestHandler):
 
         # Now we read messages from the client
         while not self.stream.closed:
-            response = self.read(1, timeout=self.client_timeout)
+            timeout = self.client_timeout
+            if self.request_regions:
+                timeout = time.time() - self.last_frameupdate_time
+                if timeout < 0:
+                    timeout = 0
+            response = self.read(1, timeout=timeout)
             if response:
                 msgtype = bytearray(response)[0]
                 handled = dispatch_msg(msgtype, self)
@@ -527,12 +536,23 @@ class VNCConnection(socketserver.BaseRequestHandler):
                 self.width = new_width
                 self.height = new_height
                 self.changed_display = False
+                # Force the update to happen as soon as possible
+                self.last_frameupdate_time = 0
 
             # If they requested some region to be drawn, so we should dispatch
-            # a frame buffer update
-            while self.request_regions:
-                region = self.request_regions.pop()
-                self.update_framebuffer(region)
+            # a frame buffer update.
+            # This throttling ensures that we won't be repeatedly trying to get data
+            # from the cairo buffer (which should already be protected by the surfacedata
+            # caching) and then comparing it for delivery to the client (which is not
+            # otherwise protected, and can be quite involved)
+            # Without this throttling, the server works as fast as it can, with the
+            # client requesting data as fast as it can.
+            if time.time() - self.last_frameupdate_time >= self.min_frame_period:
+                # Don't update more often than the frame period
+                while self.request_regions:
+                    region = self.request_regions.pop()
+                    self.update_framebuffer(region)
+                self.last_frameupdate_time = time.time()
 
     def update_framebuffer(self, region):
         """
