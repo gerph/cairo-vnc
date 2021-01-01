@@ -691,6 +691,15 @@ class VNCServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
             # Mark the clients as disconnected so that they close down
             client.disconnect()
 
+        # In order to ensure that clients are not blocked trying to
+        # insert data into the event queue, we must also clear it.
+        # FIXME: Potentially each client could be pending in the queue,
+        # and thus would have an item to insert. So if the event
+        # queue length < the number of clients connected and they're
+        # all blocking, we may still end up blocking here. For now,
+        # I'm ignoring this problem.
+        self.event_queue.clear()
+
     def client_connected(self, client):
         print("Client connected")
         self.clients.append(client)
@@ -765,7 +774,7 @@ class CairoVNCServer(object):
     def stop(self):
         if self.thread:
             # Note: This will block until the server has shut down.
-            self.shutdown()
+            self.server.shutdown()
             self.thread = None
         elif self.server:
             self.server.server_close()
