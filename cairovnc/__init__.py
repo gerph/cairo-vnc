@@ -764,7 +764,7 @@ class VNCServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         """
         # Can't do this on Python 2:
         #super(VNCServer, self).server_close()
-        socketserver.TCPServer.server_close()
+        socketserver.TCPServer.server_close(self)
 
         for client in self.clients:
             # Mark the clients as disconnected so that they close down
@@ -772,12 +772,11 @@ class VNCServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
 
         # In order to ensure that clients are not blocked trying to
         # insert data into the event queue, we must also clear it.
-        # FIXME: Potentially each client could be pending in the queue,
-        # and thus would have an item to insert. So if the event
-        # queue length < the number of clients connected and they're
-        # all blocking, we may still end up blocking here. For now,
-        # I'm ignoring this problem.
-        self.event_queue.clear()
+        try:
+            while True:
+                self.event_queue.get_nowait()
+        except queue.Empty:
+            pass
 
     def client_connected(self, client):
         """
@@ -907,6 +906,7 @@ class CairoVNCServer(object):
     """
     # The class to use for connections (override if you are subclassing)
     connection_class = VNCConnection
+    server_class = VNCServer
     event_polling_period = 0.5
 
     def __init__(self, surface, host='', port=5902, surface_lock=None, options=None):
@@ -923,16 +923,16 @@ class CairoVNCServer(object):
 
     def start(self):
         """
-        Start the server listening connections.
+        Start the server listening for connections.
 
         Thread: Any thread
 
         @note: Either serve_forever() or poll() must be called to accept connections.
         """
         if not self.server:
-            self.server = VNCServer((self.options.host, self.options.port),
-                                    self.connection_class,
-                                    surface=self.surface, options=self.options)
+            self.server = self.server_class((self.options.host, self.options.port),
+                                             self.connection_class,
+                                             surface=self.surface, options=self.options)
 
     def stop(self):
         """
