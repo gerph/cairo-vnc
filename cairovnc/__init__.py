@@ -40,7 +40,7 @@ class CairoVNCOptions(object):
     Simple options are available on the constructor. More advanced options are properties.
     """
 
-    def __init__(self, host='0.0.0.0', port=5900, password=None, password_readonly=None):
+    def __init__(self, host='0.0.0.0', port=5900, password=None, password_readonly=None, name='Cairo'):
         self.host = host
         self.port = port
 
@@ -49,6 +49,9 @@ class CairoVNCOptions(object):
         self.password = password
         # A dedicated password that allows readonly access
         self.password_readonly = password_readonly
+
+        # The name of the display
+        self.display_name = name
 
         # The maximum speed at which we will deliver frame updates, regardless of what the
         # clients request.
@@ -70,7 +73,8 @@ class CairoVNCOptions(object):
         obj = CairoVNCOptions(host=self.host,
                               port=self.port,
                               password=self.password,
-                              password_readonly=self.password_readonly)
+                              password_readonly=self.password_readonly,
+                              name=self.display_name)
 
         # Copy the less common options
         obj.max_framerate = self.max_framerate
@@ -448,12 +452,12 @@ class VNCConnection(socketserver.BaseRequestHandler):
         (width, height, rows) = self.server.surface_data()
         self.width = width
         self.height = height
-        name = self.server.display_name
+        name = self.server.options.display_name
 
         data_size = struct.pack('>HH', width, height)
         data_pixelformat = self.pixelformat.encode()
-        name_latin1 = name.encode('iso-8859-1')
-        data_name = struct.pack('>L', len(name_latin1)) + name_latin1
+        name_encoded = name.encode('utf-8')
+        data_name = struct.pack('>L', len(name_encoded)) + name_encoded
         data = data_size + data_pixelformat + data_name
         self.log("ServerInit message: %r" % (data,))
         self.stream.writedata(data)
@@ -539,6 +543,27 @@ class VNCConnection(socketserver.BaseRequestHandler):
                 # Force the update to happen as soon as possible
                 self.last_frameupdate_time = 0
 
+            if self.changed_name:
+                if self.options.display_name != self.server.options.display_name:
+                    name_encoded = self.server.options.display_name.encode('utf-8')
+                    if VNCConstants.PseudoEncoding_DesktopName in self.capabilities:
+                        # We can only send the new desktop name if it's in the capabilities.
+                        # Support for name changing is variable between clients.
+                        msg = struct.pack('>BBHHHHHl',
+                                          VNCConstants.ServerMsgType_FramebufferUpdate, 0,
+                                          1,  # one rectangle update
+                                          0, 0, 0, 0,  # x,y,width,height must be 0
+                                          VNCConstants.PseudoEncoding_DesktopName)
+                        data_name = struct.pack('>L', len(name_encoded)) + name_encoded
+                        msg += data_name
+                        self.log("Notify of DesktopName {}".format(name_encoded))
+                        self.write(msg)
+                    else:
+                        self.log("Client cannot receive DesktopName {}".format(name_encoded))
+
+                    self.options.display_name = self.server.options.display_name
+                self.changed_name = False
+
             # If they requested some region to be drawn, so we should dispatch
             # a frame buffer update.
             # This throttling ensures that we won't be repeatedly trying to get data
@@ -618,6 +643,12 @@ class VNCConnection(socketserver.BaseRequestHandler):
         """
         self.changed_display = True
 
+    def change_name(self):
+        """
+        The display name has changed, so we might have to issue a DesktopName.
+        """
+        self.changed_name = True
+
 
 class NullLock(object):
     """
@@ -640,9 +671,7 @@ class VNCServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     def __init__(self, *args, **kwargs):
         self.clients = []
         self._surface_data = None
-        self._display_name = None
         self.options = kwargs.pop('options')
-        self.display_name = kwargs.pop('display_name', 'cairo')
         self.surface = kwargs.pop('surface', None)
         self.surface_lock = kwargs.pop('surface_lock', NullLock())
         self.surface_data_lock = threading.Lock()
@@ -702,17 +731,12 @@ class VNCServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         for client in self.clients:
             client.change_surface()
 
-    @property
-    def display_name(self):
-        return self._display_name
+    def change_name(self, name):
+        self.options.display_name = name
 
-    @display_name.setter
-    def display_name(self, value):
-        self._display_name = value
-
-        # Notify all clients that the display name has changed
+        # Notify all clients that the name has changed
         for client in self.clients:
-            client.name_change()
+            client.change_name()
 
 
 class CairoVNCServer(object):
@@ -763,6 +787,9 @@ class CairoVNCServer(object):
             self.surface = surface
             self.surface_lock = surface_lock
             self.server.change_surface(surface, surface_lock)
+
+    def change_name(self, name):
+        self.server.change_name(name)
 
     def get_event(self, timeout=None):
         """

@@ -93,3 +93,15 @@ be moved with the pointer, and changing the colour of the squares when the mouse
 buttons are clicked.
 
     python example_input.py
+
+### Desktop name
+
+The desktop name is used to identify what the server calls the desktop that is being
+served. It can be supplied on creation of the server, in the options object or as
+a parameter. The name can be changed whilst the server is running by calling the
+`change_name` method on the server object, with the new name.
+
+Support for changing the deslktop name is not universal, and some clients will
+remain with the name which was initially delivered.
+
+    python example_name.py
