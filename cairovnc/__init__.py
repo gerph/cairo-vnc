@@ -3,7 +3,9 @@ Cairo surface served over VNC.
 
 Usage:
 
-    server = cairovnc.CairoVNCServer(surface=surface, port=5900)
+    import cairovnc
+    options = cairovnc.CairoVNCOptions(port=5900)
+    server = cairovnc.CairoVNCServer(surface=surface, options=options)
     server.serve_forever()
 """
 
@@ -40,7 +42,7 @@ class CairoVNCOptions(object):
     Simple options are available on the constructor. More advanced options are properties.
     """
 
-    def __init__(self, host='0.0.0.0', port=5900, password=None, password_readonly=None, name='Cairo'):
+    def __init__(self, host='0.0.0.0', port=5900, password=None, password_readonly=None, display_name='Cairo'):
         self.host = host
         self.port = port
 
@@ -51,7 +53,10 @@ class CairoVNCOptions(object):
         self.password_readonly = password_readonly
 
         # The name of the display
-        self.display_name = name
+        self.display_name = display_name
+
+        # The maximum number of clients which we'll allow (or None for no limit)
+        self.max_clients = 2
 
         # The maximum speed at which we will deliver frame updates, regardless of what the
         # clients request.
@@ -74,9 +79,10 @@ class CairoVNCOptions(object):
                               port=self.port,
                               password=self.password,
                               password_readonly=self.password_readonly,
-                              name=self.display_name)
+                              display_name=self.display_name)
 
         # Copy the less common options
+        obj.max_clients = self.max_clients
         obj.max_framerate = self.max_framerate
         obj.read_only = self.read_only
         obj.event_queue_length = self.event_queue_length
@@ -258,6 +264,12 @@ class VNCConnection(socketserver.BaseRequestHandler):
     payload_timeout = 5
 
     def setup(self):
+        """
+        Set up variables for a remote connection which is about to start.
+
+        Thread: Connection thread
+        """
+        self.connected = False
         self.stream = CommStream(self.request)
 
         self.pixelformat = PixelFormat()
@@ -301,29 +313,71 @@ class VNCConnection(socketserver.BaseRequestHandler):
         self.min_frame_period = 1.0 / self.options.max_framerate
         self.last_frameupdate_time = 0
 
+    def handle(self):
+        """
+        Handle a connection from a remote server.
+
+        Thread: Connection thread
+        """
+        self.log("Connection received")
+        if not self.server.client_connected(self):
+            # Connection was denied; we'll just return immediately
+            return
+        self.connected = True
+        try:
+            self.do_vnc_protocol()
+        except Exception as exc:
+            self.log_exception(exc)
+
     def finish(self):
-        self.server.client_disconnected(self)
+        """
+        Clean up after the connection has been handled.
+
+        Thread: Connection thread
+        """
+        if self.connected:
+            # We only notify the server object that we disconnected if we had said we were connected
+            self.server.client_disconnected(self)
         self.stream.closed = True
 
     def disconnect(self):
         """
         Request to disconnect this client.
+
+        Thread: Any thread
         """
         # We flag this by treating the stream as closed, so that we exit our handling loop
         self.stream.closed = True
 
     def read(self, size, timeout):
+        """
+        Read a number of bytes from the connection.
+
+        Thread: Connection thread
+        """
         return self.stream.read_nbytes(size, timeout=timeout)
 
     def write(self, data):
+        """
+        Write data to the connection, blocking until all the data is sent.
+
+        Thread: Connection thread
+        """
         return self.stream.writedata(data)
 
     def log(self, message):
+        """
+        Log a message to the server object.
+
+        Thread: Connection thread
+        """
         self.server.client_log(self, message)
 
     def log_exception(self, exc):
         """
         An exception occurred during processing; log any details necessary.
+
+        Thread: Connection thread
         """
         self.log("Exception: {}: {}".format(exc.__class__.__name__,
                                             exc))
@@ -335,6 +389,8 @@ class VNCConnection(socketserver.BaseRequestHandler):
         7.1.1 ProtocolVersion Handshake
 
         Announce ourselves, and find out what protocol they want to speak.
+
+        Thread: Connection thread
 
         @return: True if we were successful; False if something went wrong.
         """
@@ -359,6 +415,8 @@ class VNCConnection(socketserver.BaseRequestHandler):
         7.1.2. Security handshake
 
         Negotiate authentication and security protocols.
+
+        Thread: Connection thread
 
         @return: True if we were successful; False if something went wrong.
         """
@@ -425,6 +483,8 @@ class VNCConnection(socketserver.BaseRequestHandler):
 
         Read their requested access.
 
+        Thread: Connection thread
+
         @return: True if we were successful; False if something went wrong.
         """
         response = self.read(1, timeout=self.connect_timeout)
@@ -447,6 +507,8 @@ class VNCConnection(socketserver.BaseRequestHandler):
 
         Report the initial framebuffer configuration and server name.
 
+        Thread: Connection thread
+
         @return: True if we were successful; False if something went wrong.
         """
         (width, height, rows) = self.server.surface_data()
@@ -464,15 +526,14 @@ class VNCConnection(socketserver.BaseRequestHandler):
 
         return True
 
-    def handle(self):
-        self.log("Connection received")
-        self.server.client_connected(self)
-        try:
-            self.do_vnc_protocol()
-        except Exception as exc:
-            self.log_exception(exc)
-
     def do_vnc_protocol(self):
+        """
+        Run through the VNC protocol.
+
+        Thread: Connection thread
+
+        We return when the connection has been closed or some invalid operation was performed.
+        """
         # 7.1.1. ProtocolVersion Handshake
         if not self.do_protocol():
             return
@@ -582,6 +643,8 @@ class VNCConnection(socketserver.BaseRequestHandler):
     def update_framebuffer(self, region):
         """
         Framebuffer updates here use only whole rows, because we're lazy here.
+
+        Thread: Connection thread
         """
         (width, height, surface_rows) = self.server.surface_data()
         if not region.incremental:
@@ -634,18 +697,24 @@ class VNCConnection(socketserver.BaseRequestHandler):
     def queue_event(self, event):
         """
         Insert an event into the queue for the animator.
+
+        Thread: Connection thread
         """
         self.server.event_queue.put(event)
 
     def change_surface(self):
         """
         The display surface has changed, so we might need to issue a DesktopSize.
+
+        Thread: Off connection thread
         """
         self.changed_display = True
 
     def change_name(self):
         """
         The display name has changed, so we might have to issue a DesktopName.
+
+        Thread: Off connection thread
         """
         self.changed_name = True
 
@@ -670,6 +739,7 @@ class VNCServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
 
     def __init__(self, *args, **kwargs):
         self.clients = []
+        self.client_lock = threading.Lock()
         self._surface_data = None
         self.options = kwargs.pop('options')
         self.surface = kwargs.pop('surface', None)
@@ -683,6 +753,11 @@ class VNCServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         socketserver.TCPServer.__init__(self, *args, **kwargs)
 
     def server_close(self):
+        """
+        Close the connection to the server
+
+        Thread: Any thread
+        """
         # Can't do this on Python 2:
         #super(VNCServer, self).server_close()
         socketserver.TCPServer.server_close()
@@ -701,17 +776,60 @@ class VNCServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         self.event_queue.clear()
 
     def client_connected(self, client):
-        print("Client connected")
-        self.clients.append(client)
+        """
+        Notification that a client has connected and is about to be processed.
+
+        Thread: Connection thread
+
+        @param client:  Client connection object
+
+        @return: True to accept the connection; False to drop it
+        """
+        with self.client_lock:
+            print("Client connected")
+            if len(self.clients) == self.options.max_clients:
+                # There are already the maximum number of clients connected.
+                # We're going to drop this connection.
+                return False
+
+            self.clients.append(client)
+        return True
 
     def client_disconnected(self, client):
-        print("Client disconnected")
-        self.clients.remove(client)
+        """
+        Notification that a client has disconnected and is about to be closed.
+
+        Thread: Connection thread
+
+        @param client:  Client connection object
+        """
+        with self.client_lock:
+            print("Client disconnected")
+            self.clients.remove(client)
 
     def client_log(self, client, message):
+        """
+        Log messages from a client.
+
+        Thread: Connection thread
+
+        @param client:  Client connection object
+        @param message: Message string
+        """
         print("Client: {}".format(message))
 
     def surface_data(self):
+        """
+        Read the current surface data.
+
+        Thread: Connection thread
+
+        @note: Blocks until data is available, which may be delayed by framerate or other
+               client's access.
+
+        @return: Tuple of (width, height, data). Data is in the form of a list of rows of bytes
+                 in the order BB, GG, RR, xx, ...
+        """
         with self.surface_data_lock:
             if not self._surface_data:
                 self._surface_data = SurfaceData(self.surface, self.surface_lock,
@@ -719,6 +837,13 @@ class VNCServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
             return self._surface_data.get_data()
 
     def surface_size(self):
+        """
+        Read the current surface width and height.
+
+        Thread: Connection thread
+
+        @return: Tuple of (width, height)
+        """
         with self.surface_data_lock:
             if not self._surface_data:
                 self._surface_data = SurfaceData(self.surface, self.surface_lock,
@@ -726,8 +851,18 @@ class VNCServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
             return self._surface_data.get_size()
 
     def change_surface(self, surface, surface_lock):
+        """
+        Change the surface which is used by the clients.
+
+        Thread: Off connection thread
+
+        @param surface:         Cairo surface to offer to clients
+        @param surface_lock:    threading.Lock() object to use whilst accessing the surface,
+                                or None to omit locking.
+        """
+        surface_lock = surface_lock or NullLock()
         with self.surface_data_lock:
-            self.surface_lock = surface_lock or NullLock()
+            self.surface_lock = surface_lock
 
             if self.surface == surface:
                 # No change, so don't perform any update and don't invalidate the data
@@ -741,6 +876,13 @@ class VNCServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
             client.change_surface()
 
     def change_name(self, name):
+        """
+        Change the desktop name which is used by the clients.
+
+        Thread: Off connection thread
+
+        @param name:    New name for the display.
+        """
         self.options.display_name = name
 
         # Notify all clients that the name has changed
@@ -749,6 +891,13 @@ class VNCServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
 
 
 class CairoVNCServer(object):
+    """
+    Public class for CairoVNC servers.
+
+    This class should be the interface that most users will create. It may be
+    subclassed to replace functionality (eg replacing the VNCConnection to get
+    different information in each client).
+    """
     # The class to use for connections (override if you are subclassing)
     connection_class = VNCConnection
     event_polling_period = 0.5
@@ -766,12 +915,26 @@ class CairoVNCServer(object):
         self.thread = None
 
     def start(self):
+        """
+        Start the server listening connections.
+
+        Thread: Any thread
+
+        @note: Either serve_forever() or poll() must be called to accept connections.
+        """
         if not self.server:
             self.server = VNCServer((self.options.host, self.options.port),
                                     self.connection_class,
                                     surface=self.surface, options=self.options)
 
     def stop(self):
+        """
+        Stop the server listening and close all client connections.
+
+        Thread: Any thread
+
+        @note: Will block until the server has shut down; connections may however linger for a short period.
+        """
         if self.thread:
             # Note: This will block until the server has shut down.
             self.server.shutdown()
@@ -781,28 +944,75 @@ class CairoVNCServer(object):
             self.server = None
 
     def serve_forever(self):
+        """
+        Begin serving on the current thread, until stopped by the stop() method.
+
+        Thread: Any thread
+
+        @note: Blocks until stopped by the stop() method.
+        """
         self.start()
         self.server.serve_forever()
         self.server.server_close()
         self.server = None
 
+    def poll(self, timeout=0):
+        """
+        Poll for any new connections.
+
+        Thread: Any thread
+
+        @param timeout:     None to wait until a new connection received, or a number of seconds to block for
+        """
+        if not self.server:
+            return
+        self.server.timeout = timeout
+        self.server.handle_request()
+
     def daemonise(self):
+        """
+        Start the server listening on a daemon thread (will not block process exit).
+
+        Thread: Any thread
+
+        The server will continue running until it is stopped by the stop() method, or the process exits.
+        """
+        if self.thread:
+            return
         self.thread = threading.Thread(target=self.serve_forever)
         self.thread.daemon = True
         self.thread.start()
 
     def change_surface(self, surface, surface_lock=None):
+        """
+        Change the surface which is used by the clients.
+
+        Thread: Off connection thread
+
+        @param surface:         Cairo surface to offer to clients
+        @param surface_lock:    threading.Lock() object to use whilst accessing the surface,
+                                or None to omit locking.
+        """
+        self.surface = surface
+        self.surface_lock = surface_lock
         if self.server:
-            self.surface = surface
-            self.surface_lock = surface_lock
             self.server.change_surface(surface, surface_lock)
 
     def change_name(self, name):
+        """
+        Change the desktop name which is used by the clients.
+
+        Thread: Off connection thread
+
+        @param name:    New name for the display.
+        """
         self.server.change_name(name)
 
     def get_event(self, timeout=None):
         """
         Read an event from the queue, potentially with a timeout.
+
+        Thread: Off connection thread
 
         @param timeout:     Timeout, in seconds, for reading an event, or None to wait forever
 
