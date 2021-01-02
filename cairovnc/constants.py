@@ -84,6 +84,7 @@ class VNCConstants(object):
     Encoding_TightPNG = -260
 
     # Capabilities (as encodings)
+    PseudoEncoding_Apple1011 = 1011  # We use this to recognise an Apple Screen Sharing client
     PseudoEncoding_JPEGQualityBase = -23
     PseudoEncoding_DesktopSize = -223
     PseudoEncoding_LastRect = -224

@@ -172,6 +172,37 @@ buttons are clicked.
 
     python example_input.py
 
+### Push frames
+
+The VNC protocol is client-driven. This means that the client is meant to request
+frames at a rate that is appropriate for it. The server is then meant to service
+those requests at a speed that is appropriate to it. This should result in the
+framerate being the minimum of the two ends, allowing for network bandwidth.
+
+However, some clients don't do this. For example, the Apple Screen Sharing client
+sends a single FrameUpdateRequest and then does nothing further (unless the size
+of the desktop is changed). This means that a strictly compliant server will show
+only the first frame to such clients.
+
+'Push frames' are frames that are sent unsolicited to the client - a protocol
+violation, but one which appears necessary for at least the Apple Screen Sharing
+Client. To use push frames, it is necessary to inform the `CairoVNCServer`
+object that the frame has changed. This is achieved by the `change_frame` method.
+
+Only clients that are recognised as requiring push frames will be affected by
+this flag. However, they can be explicitly enabled for all clients by setting
+the `push_requests` flag in the options. Clients which are requesting frames from
+the server through the normal mechanism will be unaffected by these notifications.
+
+The following example adds the push frame support to the input example. It also
+removes the surface changes, as this obscures the effect of push frames. Because
+this example is intended for use with the Apple Screen Sharing client, which does
+not support unauthenticated connections, there is also a password of `pass` on
+the example.
+
+    python example_push.py
+
+
 ### Verbose logging
 
 Whilst debugging, and during development, it is often useful to know what has

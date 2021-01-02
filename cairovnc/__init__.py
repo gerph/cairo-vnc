@@ -74,6 +74,15 @@ class CairoVNCOptions(object):
         # enough that we don't gobble memory.
         self.event_queue_length = 500
 
+        # Whether we will push frames when the client says that the surface has changed.
+        # This is a protocol violation, because FrameUpdate messages from the server are only
+        # meant to be sent in response to FrameUpdateRequest messages from the client.
+        # However, the Apple Screen Sharing client doesn't update at all unless you push
+        # requests.
+        # This is detected by an Apple-specific encoding being supplied in the capabilities
+        # of the client, but it could be enabled for all clients.
+        self.push_requests = False
+
         # Whether we're giving log output of what's happening
         self.verbose = False
 
@@ -89,6 +98,7 @@ class CairoVNCOptions(object):
         obj.max_framerate = self.max_framerate
         obj.read_only = self.read_only
         obj.event_queue_length = self.event_queue_length
+        obj.push_requests = self.push_requests
         obj.verbose = self.verbose
 
         return obj
@@ -315,7 +325,10 @@ class VNCConnection(socketserver.BaseRequestHandler):
         self.request_regions = Regions()
         self.last_rows = {}
         self.min_frame_period = 1.0 / self.options.max_framerate
-        self.last_frameupdate_time = 0
+        self.last_frameupdate_time = 0          # When we last sent a frame update
+        self.last_frameupdaterequest_time = 0   # When they last requested a frame update
+        self.last_frameupdate_push_time = 0     # When the oldest pending frameupdate push was requested
+        self.changed_frame = False              # Whether there's a push pending
 
     def handle(self):
         """
@@ -557,7 +570,7 @@ class VNCConnection(socketserver.BaseRequestHandler):
         # Now we read messages from the client
         while not self.stream.closed:
             timeout = self.client_timeout
-            if self.request_regions:
+            if self.request_regions or self.options.push_requests:
                 timeout = time.time() - self.last_frameupdate_time
                 if timeout < 0:
                     timeout = 0
@@ -568,6 +581,20 @@ class VNCConnection(socketserver.BaseRequestHandler):
                 if not handled:
                     # Something went wrong; so we're done with this connection
                     break
+
+            if self.changed_frame:
+                if self.options.push_requests:
+                    # There is a changed frame request pending, and we have push requests enabled.
+                    if not self.request_regions:
+                        if time.time() - self.last_frameupdate_time >= self.min_frame_period:
+                            # Add a request for a full redraw
+                            self.request_regions.add(RegionRequest(incremental=False,
+                                                                   x=0, y=0,
+                                                                   width=self.width, height=self.height))
+                            self.changed_frame = False
+                else:
+                    # They don't want push requests, so we can clear the flag
+                    self.changed_frame = False
 
             if self.changed_display:
                 # There was a notification that the display was changed, so we may
@@ -698,11 +725,28 @@ class VNCConnection(socketserver.BaseRequestHandler):
         msg = b''.join(msg_data)
         self.write(msg)
 
+    def set_capabilities(self, capabilities):
+        """
+        Update the capabilities used by this client.
+
+        Thread: Connection thread
+
+        @param capabilities: A list of the encodings that the client is capable of
+        """
+        self.capabilities |= set(capabilities)
+        if VNCConstants.PseudoEncoding_Apple1011 in capabilities:
+            # This is an Apple Screen Sharing client.
+            # So we're going to enable the push frames, as otherwise it won't update.
+            self.options.push_requests = True
+
+
     def queue_event(self, event):
         """
         Insert an event into the queue for the animator.
 
         Thread: Connection thread
+
+        @param event:   A VNCEvent to put on the queue.
         """
         self.server.event_queue.put(event)
 
@@ -721,6 +765,14 @@ class VNCConnection(socketserver.BaseRequestHandler):
         Thread: Off connection thread
         """
         self.changed_name = True
+
+    def change_frame(self):
+        """
+        The frame has changed; we may want to update the client.
+
+        Thread: Off connection thread
+        """
+        self.changed_frame = True
 
 
 class NullLock(object):
@@ -895,6 +947,15 @@ class VNCServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         for client in self.clients:
             client.change_name()
 
+    def change_frame(self):
+        """
+        Notify the clients that a new frame is available (for pushing frames)
+
+        Thread: Off connection thread
+        """
+        for client in self.clients:
+            client.change_frame()
+
 
 class CairoVNCServer(object):
     """
@@ -1014,6 +1075,14 @@ class CairoVNCServer(object):
         @param name:    New name for the display.
         """
         self.server.change_name(name)
+
+    def change_frame(self):
+        """
+        Notify the clients that a new frame is available (for pushing frames)
+
+        Thread: Off connection thread
+        """
+        self.server.change_frame()
 
     def get_event(self, timeout=None):
         """

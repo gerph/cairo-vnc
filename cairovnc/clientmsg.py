@@ -3,6 +3,7 @@ Handlers for the messages that the clients may send.
 """
 
 import struct
+import time
 
 from .constants import VNCConstants
 from .regions import RegionRequest
@@ -57,7 +58,7 @@ def msg_SetEncodings(connection, payload):
     connection.log("SetEncodings: %i encodings: (%r)" % (nencodings, encodings))
     encoding_names = (VNCConstants.encoding_names.get(enc, str(enc)) for enc in encodings)
     connection.log("SetEncodings: names: %s" % (', '.join(encoding_names)))
-    connection.capabilities = set(encodings)
+    connection.set_capabilities(encodings)
 
 
 @register_msg(VNCConstants.ClientMsgType_FramebufferUpdateRequest, payload_size=1 + 2 * 4)
@@ -66,6 +67,14 @@ def msg_FramebufferUpdateRequest(connection, payload):
     region = RegionRequest(incremental, xpos, ypos, width, height)
     #connection.log("FramebufferUpdateRequest: {!r}".format(region))
     connection.request_regions.add(region)
+
+    # We want to track when the FrameUpdate Request comes in so that we can deliver any
+    # further pushed updates after that one has been delivered and another time period
+    # has passed.
+    connection.last_frameupdate_request_time = time.time()
+    # As soon as they request a frame, any pending frame push is discarded (because the
+    # frame buffer update will cause the frame to be requested, or the next one will).
+    connection.changed_frame = False
 
 
 @register_msg(VNCConstants.ClientMsgType_KeyEvent, payload_size=1 + 2 + 4)
