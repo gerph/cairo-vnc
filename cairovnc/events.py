@@ -12,6 +12,9 @@ Mouse events:
     although without auto-repeat.
 """
 
+import time
+
+
 class VNCEvent(object):
     """
     Base class for events.
@@ -94,6 +97,11 @@ class VNCEventKey(object):
         self.key = key
         self.down = bool(down)
 
+    def __repr__(self):
+        return "<{}(key &{:x}, {})>".format(self.__class__.__name__,
+                                            self.key,
+                                            'down' if self.down else 'up')
+
 
 class VNCEventMove(object):
     """
@@ -106,6 +114,10 @@ class VNCEventMove(object):
         self.x = x
         self.y = y
         self.buttons = buttons
+
+    def __repr__(self):
+        return "<{}({}, {}, buttons {})>".format(self.__class__.__name__,
+                                                 self.x, self.y, self.buttons)
 
 
 class VNCEventClick(object):
@@ -120,3 +132,8 @@ class VNCEventClick(object):
         self.y = y
         self.button = button
         self.down = bool(down)
+
+    def __repr__(self):
+        return "<{}({}, {}, button {}, {})>".format(self.__class__.__name__,
+                                                    self.x, self.y, self.button,
+                                                    'down' if self.down else 'up')
