@@ -739,7 +739,6 @@ class VNCConnection(socketserver.BaseRequestHandler):
             # So we're going to enable the push frames, as otherwise it won't update.
             self.options.push_requests = True
 
-
     def queue_event(self, event):
         """
         Insert an event into the queue for the animator.
@@ -1005,7 +1004,8 @@ class CairoVNCServer(object):
         """
         if self.thread:
             # Note: This will block until the server has shut down.
-            self.server.shutdown()
+            if self.server:
+                self.server.shutdown()
             self.thread = None
         elif self.server:
             self.server.server_close()
@@ -1074,7 +1074,8 @@ class CairoVNCServer(object):
 
         @param name:    New name for the display.
         """
-        self.server.change_name(name)
+        if self.server:
+            self.server.change_name(name)
 
     def change_frame(self):
         """
@@ -1082,7 +1083,8 @@ class CairoVNCServer(object):
 
         Thread: Off connection thread
         """
-        self.server.change_frame()
+        if self.server:
+            self.server.change_frame()
 
     def get_event(self, timeout=None):
         """
