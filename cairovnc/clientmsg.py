@@ -95,7 +95,10 @@ def msg_PointerEvent(connection, payload):
         # First we deliver any movement events.
         if xpos != connection.pointer_xpos or ypos != connection.pointer_ypos:
             connection.queue_event(VNCEventMove(xpos, ypos, buttons))
+            connection.pointer_xpos = xpos
+            connection.pointer_ypos = ypos
         diff = connection.pointer_buttons ^ buttons
+        connection.pointer_buttons = buttons
         if diff:
             # Buttons changed, so we need to deliver click or release events
             for button in range(0, 8):
