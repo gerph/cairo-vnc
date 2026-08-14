@@ -26,6 +26,7 @@ import termios
 import threading
 import time
 import traceback
+import zlib
 
 from .constants import VNCConstants
 from .surfacedata import SurfaceData
@@ -33,6 +34,9 @@ from .pixeldata import PixelFormat
 from .clientmsg import dispatch_msg
 from .regions import Regions, RegionRequest
 from .security import get_security_types
+
+
+__version__ = '0.2.0'
 
 
 class CairoVNCOptions(object):
@@ -86,6 +90,9 @@ class CairoVNCOptions(object):
         # Whether we're giving log output of what's happening
         self.verbose = False
 
+        # The zlib compression level used for framebuffer rectangles.
+        self.zlib_level = 6
+
     def copy(self):
         obj = CairoVNCOptions(host=self.host,
                               port=self.port,
@@ -100,6 +107,7 @@ class CairoVNCOptions(object):
         obj.event_queue_length = self.event_queue_length
         obj.push_requests = self.push_requests
         obj.verbose = self.verbose
+        obj.zlib_level = self.zlib_level
 
         return obj
 
@@ -330,6 +338,7 @@ class VNCConnection(socketserver.BaseRequestHandler):
         self.last_frameupdaterequest_time = 0   # When they last requested a frame update
         self.last_frameupdate_push_time = 0     # When the oldest pending frameupdate push was requested
         self.changed_frame = False              # Whether there's a push pending
+        self.zlib_compressor = zlib.compressobj(self.options.zlib_level)
 
     def handle(self):
         """
@@ -715,11 +724,27 @@ class VNCConnection(socketserver.BaseRequestHandler):
             self.log("FramebufferUpdate: {} rectangles to send".format(nrects))
             for y0, rows in redraw_range:
 
-                rows_data = [struct.pack('>HHHHl', 0, y0, width, rows, VNCConstants.Encoding_Raw)]
-                self.log("    Sending rows {} - {}".format(y0, y0 + rows))
+                raw_data = []
                 for y in range(y0, y0 + rows):
-                    rows_data.append(self.pixelformat.converter(surface_rows[y]))
+                    raw_data.append(self.pixelformat.converter(surface_rows[y]))
                     self.last_rows[y] = surface_rows[y]
+
+                raw_data = b''.join(raw_data)
+                encoding = VNCConstants.Encoding_Raw
+                rows_data = [struct.pack('>HHHHl', 0, y0, width, rows, encoding)]
+                if VNCConstants.Encoding_zlib in self.capabilities:
+                    encoding = VNCConstants.Encoding_zlib
+                    compressed_data = self.zlib_compressor.compress(raw_data)
+                    compressed_data += self.zlib_compressor.flush(zlib.Z_SYNC_FLUSH)
+                    rows_data[0] = struct.pack('>HHHHl', 0, y0, width, rows, encoding)
+                    rows_data.append(struct.pack('>L', len(compressed_data)))
+                    rows_data.append(compressed_data)
+                    self.log("    Sending rows {} - {} as zlib: {} raw bytes, {} compressed bytes".format(
+                        y0, y0 + rows, len(raw_data), len(compressed_data)))
+                else:
+                    rows_data.append(raw_data)
+                    self.log("    Sending rows {} - {} as Raw: {} bytes".format(
+                        y0, y0 + rows, len(raw_data)))
 
                 msg_data.extend(rows_data)
 
@@ -734,11 +759,9 @@ class VNCConnection(socketserver.BaseRequestHandler):
 
         @param capabilities: A list of the encodings that the client is capable of
         """
-        self.capabilities |= set(capabilities)
-        if VNCConstants.PseudoEncoding_Apple1011 in capabilities:
-            # This is an Apple Screen Sharing client.
-            # So we're going to enable the push frames, as otherwise it won't update.
-            self.options.push_requests = True
+        self.capabilities = set(capabilities)
+        self.options.push_requests = (self.server.options.push_requests or
+                                      VNCConstants.PseudoEncoding_Apple1011 in self.capabilities)
 
     def queue_event(self, event):
         """
