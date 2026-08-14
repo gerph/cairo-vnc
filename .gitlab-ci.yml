@@ -1,0 +1,18 @@
+stages:
+  - test
+
+python27:
+  stage: test
+  tags:
+    - linux-wxwidgets
+  script:
+    - python2 -m unittest discover -s tests -v
+    - python2 -m compileall -q cairovnc tests example_*.py
+
+python3:
+  stage: test
+  tags:
+    - linux-wxwidgets
+  script:
+    - python3 -m unittest discover -s tests -v
+    - python3 -m compileall -q cairovnc tests example_*.py

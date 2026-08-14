@@ -29,7 +29,7 @@ class VNCEvent(object):
         return "<{}()>".format(self.__class__.__name__)
 
 
-class VNCEventKey(object):
+class VNCEventKey(VNCEvent):
     """
     A Key input event (press or release).
     """
@@ -103,7 +103,7 @@ class VNCEventKey(object):
                                             'down' if self.down else 'up')
 
 
-class VNCEventMove(object):
+class VNCEventMove(VNCEvent):
     """
     A pointer move event.
     """
@@ -120,7 +120,7 @@ class VNCEventMove(object):
                                                  self.x, self.y, self.buttons)
 
 
-class VNCEventClick(object):
+class VNCEventClick(VNCEvent):
     """
     A pointer click event (press or release).
     """
@@ -137,3 +137,25 @@ class VNCEventClick(object):
         return "<{}({}, {}, button {}, {})>".format(self.__class__.__name__,
                                                     self.x, self.y, self.button,
                                                     'down' if self.down else 'up')
+
+
+class VNCEventScroll(VNCEvent):
+    """
+    A pointer wheel scroll event.
+
+    ``dx`` and ``dy`` are wheel steps. Positive vertical steps are up and
+    positive horizontal steps are right.
+    """
+    name = 'scroll'
+
+    def __init__(self, x, y, dx, dy):
+        super(VNCEventScroll, self).__init__()
+        self.x = x
+        self.y = y
+        self.dx = dx
+        self.dy = dy
+
+    def __repr__(self):
+        return "<{}({}, {}, dx {}, dy {})>".format(self.__class__.__name__,
+                                                    self.x, self.y, self.dx,
+                                                    self.dy)

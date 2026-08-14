@@ -26,6 +26,7 @@ import termios
 import threading
 import time
 import traceback
+import zlib
 
 from .constants import VNCConstants
 from .surfacedata import SurfaceData
@@ -33,6 +34,10 @@ from .pixeldata import PixelFormat
 from .clientmsg import dispatch_msg
 from .regions import Regions, RegionRequest
 from .security import get_security_types
+from .cursor import VNCCursor
+
+
+__version__ = '0.2.0'
 
 
 class CairoVNCOptions(object):
@@ -86,6 +91,9 @@ class CairoVNCOptions(object):
         # Whether we're giving log output of what's happening
         self.verbose = False
 
+        # The zlib compression level used for framebuffer rectangles.
+        self.zlib_level = 6
+
     def copy(self):
         obj = CairoVNCOptions(host=self.host,
                               port=self.port,
@@ -100,6 +108,7 @@ class CairoVNCOptions(object):
         obj.event_queue_length = self.event_queue_length
         obj.push_requests = self.push_requests
         obj.verbose = self.verbose
+        obj.zlib_level = self.zlib_level
 
         return obj
 
@@ -308,6 +317,7 @@ class VNCConnection(socketserver.BaseRequestHandler):
 
         # Button states
         self.pointer_buttons = 0
+        self.pointer_wire_buttons = 0
         self.pointer_xpos = -1
         self.pointer_ypos = -1
 
@@ -329,6 +339,8 @@ class VNCConnection(socketserver.BaseRequestHandler):
         self.last_frameupdaterequest_time = 0   # When they last requested a frame update
         self.last_frameupdate_push_time = 0     # When the oldest pending frameupdate push was requested
         self.changed_frame = False              # Whether there's a push pending
+        self.zlib_compressor = zlib.compressobj(self.options.zlib_level)
+        self.changed_cursor = True
 
     def handle(self):
         """
@@ -706,7 +718,10 @@ class VNCConnection(socketserver.BaseRequestHandler):
             if diff_start is not None:
                 redraw_range.append((diff_start, diff_size))
 
-        nrects = len(redraw_range)
+        send_cursor = (getattr(self, 'changed_cursor', False) and
+                       getattr(self.server, 'cursor', None) and
+                       VNCConstants.PseudoEncoding_Cursor in self.capabilities)
+        nrects = len(redraw_range) + int(bool(send_cursor))
         msg_data = [struct.pack('>BBH', VNCConstants.ServerMsgType_FramebufferUpdate,
                                         0,
                                         nrects)]
@@ -714,13 +729,45 @@ class VNCConnection(socketserver.BaseRequestHandler):
             self.log("FramebufferUpdate: {} rectangles to send".format(nrects))
             for y0, rows in redraw_range:
 
-                rows_data = [struct.pack('>HHHHl', 0, y0, width, rows, VNCConstants.Encoding_Raw)]
-                self.log("    Sending rows {} - {}".format(y0, y0 + rows))
+                raw_data = []
                 for y in range(y0, y0 + rows):
-                    rows_data.append(self.pixelformat.converter(surface_rows[y]))
+                    raw_data.append(self.pixelformat.converter(surface_rows[y]))
                     self.last_rows[y] = surface_rows[y]
 
+                raw_data = b''.join(raw_data)
+                encoding = VNCConstants.Encoding_Raw
+                rows_data = [struct.pack('>HHHHl', 0, y0, width, rows, encoding)]
+                if VNCConstants.Encoding_zlib in self.capabilities:
+                    encoding = VNCConstants.Encoding_zlib
+                    compressed_data = self.zlib_compressor.compress(raw_data)
+                    compressed_data += self.zlib_compressor.flush(zlib.Z_SYNC_FLUSH)
+                    rows_data[0] = struct.pack('>HHHHl', 0, y0, width, rows, encoding)
+                    rows_data.append(struct.pack('>L', len(compressed_data)))
+                    rows_data.append(compressed_data)
+                    self.log("    Sending rows {} - {} as zlib: {} raw bytes, {} compressed bytes".format(
+                        y0, y0 + rows, len(raw_data), len(compressed_data)))
+                else:
+                    rows_data.append(raw_data)
+                    self.log("    Sending rows {} - {} as Raw: {} bytes".format(
+                        y0, y0 + rows, len(raw_data)))
+
                 msg_data.extend(rows_data)
+
+            if send_cursor:
+                cursor = self.server.cursor
+                pixels = []
+                for y in range(cursor.height):
+                    offset = y * cursor.width * 4
+                    pixels.append(self.pixelformat.converter(
+                        cursor.pixels[offset:offset + cursor.width * 4]))
+                msg_data.append(struct.pack('>HHHHl', cursor.hotspot[0], cursor.hotspot[1],
+                                            cursor.width, cursor.height,
+                                            VNCConstants.PseudoEncoding_Cursor))
+                msg_data.append(b''.join(pixels))
+                msg_data.append(cursor.mask)
+                self.log("    Sending Cursor {}x{} at {},{}".format(
+                    cursor.width, cursor.height, cursor.hotspot[0], cursor.hotspot[1]))
+                self.changed_cursor = False
 
         msg = b''.join(msg_data)
         self.write(msg)
@@ -733,11 +780,9 @@ class VNCConnection(socketserver.BaseRequestHandler):
 
         @param capabilities: A list of the encodings that the client is capable of
         """
-        self.capabilities |= set(capabilities)
-        if VNCConstants.PseudoEncoding_Apple1011 in capabilities:
-            # This is an Apple Screen Sharing client.
-            # So we're going to enable the push frames, as otherwise it won't update.
-            self.options.push_requests = True
+        self.capabilities = set(capabilities)
+        self.options.push_requests = (self.server.options.push_requests or
+                                      VNCConstants.PseudoEncoding_Apple1011 in self.capabilities)
 
     def queue_event(self, event):
         """
@@ -773,6 +818,10 @@ class VNCConnection(socketserver.BaseRequestHandler):
         """
         self.changed_frame = True
 
+    def change_cursor(self):
+        """The cursor has changed and should accompany the next update."""
+        self.changed_cursor = True
+
 
 class NullLock(object):
     """
@@ -798,7 +847,8 @@ class VNCServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         self._surface_data = None
         self.options = kwargs.pop('options')
         self.surface = kwargs.pop('surface', None)
-        self.surface_lock = kwargs.pop('surface_lock', NullLock())
+        self.surface_lock = kwargs.pop('surface_lock', None) or NullLock()
+        self.cursor = kwargs.pop('cursor', None)
         self.surface_data_lock = threading.Lock()
 
         self.event_queue = queue.Queue(self.options.event_queue_length)
@@ -955,6 +1005,12 @@ class VNCServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         for client in self.clients:
             client.change_frame()
 
+    def change_cursor(self, cursor):
+        """Change the cursor and notify connected clients."""
+        self.cursor = cursor
+        for client in self.clients:
+            client.change_cursor()
+
 
 class CairoVNCServer(object):
     """
@@ -969,12 +1025,13 @@ class CairoVNCServer(object):
     server_class = VNCServer
     event_polling_period = 0.5
 
-    def __init__(self, surface, host='', port=5902, surface_lock=None, options=None):
+    def __init__(self, surface, host='', port=5902, surface_lock=None, options=None, cursor=None):
         if options is None:
             options = CairoVNCOptions(host=host, port=port)
         self.options = options
         self.surface = surface
-        self.surface_lock = None
+        self.surface_lock = surface_lock
+        self.cursor = cursor
 
         # The object currently available for serving
         self.server = None
@@ -992,7 +1049,8 @@ class CairoVNCServer(object):
         if not self.server:
             self.server = self.server_class((self.options.host, self.options.port),
                                              self.connection_class,
-                                             surface=self.surface, options=self.options)
+                                             surface=self.surface, surface_lock=self.surface_lock,
+                                             options=self.options, cursor=self.cursor)
 
     def stop(self):
         """
@@ -1085,6 +1143,16 @@ class CairoVNCServer(object):
         """
         if self.server:
             self.server.change_frame()
+
+    def change_cursor(self, cursor):
+        """Change the cursor which is sent to clients that support it."""
+        self.cursor = cursor
+        if self.server:
+            self.server.change_cursor(cursor)
+
+    def change_cursor_surface(self, surface, hotspot=(0, 0), surface_lock=None):
+        """Create a cursor from a Cairo surface and make it current."""
+        self.change_cursor(VNCCursor.from_surface(surface, hotspot, surface_lock))
 
     def get_event(self, timeout=None):
         """

@@ -4,8 +4,6 @@ Surface conversion to data that we can return to the user.
 
 import time
 
-import cairo
-
 from .constants import VNCConstants
 from .errors import CairoVNCBadSurfaceFormatError
 
@@ -74,6 +72,10 @@ class SurfaceData(object):
 
         @return: tuple of (width, height, list of rows of bytes())
         """
+        # Keep the package importable for protocol-only users and tests. Cairo
+        # is only needed when a surface is actually read.
+        import cairo
+
         now = time.time()
         if now - self.last_data_time < self.min_period:
             # This is a request within the frame period, so return the last data we got

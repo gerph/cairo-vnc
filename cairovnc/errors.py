@@ -21,3 +21,8 @@ class CairoVNCBadSurfaceFormatError(CairoVNCError):
     Raised when the format used by the Cairo surface is not supported.
     """
     pass
+
+
+class CairoVNCBadCursorError(CairoVNCError):
+    """Raised when a cursor definition is invalid."""
+    pass

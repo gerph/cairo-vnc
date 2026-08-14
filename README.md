@@ -86,7 +86,7 @@ the type of `VNCEvent` instance that has been supplied, or examining the `name` 
 event. All events have a `timestamp` object which contains the `time.time()` value when the event
 was queued.
 
-There are currently 3 events which can be delivered:
+There are currently 4 events which can be delivered:
 
 * `VNCEventKey`: (name `key`) \
 This event delivers a key press or release event.
@@ -101,6 +101,10 @@ This event delivers a pointer click or release; it is the pointer analogue of th
     * Property `x`, `y`: Contains the coordinates of the pointer within the frame buffer, as positive pixel offsets from the top left corner.
     * Property `button`: Contains the mouse button number, starting from 0 for the first button.
     * Property `down`: `True` if the event is for a click, `False` if the event is for a release.
+* `VNCEventScroll`: (name `scroll`) \
+This event delivers a pointer-wheel step.
+    * Property `x`, `y`: Contains the pointer position for the wheel event.
+    * Property `dx`, `dy`: Horizontal and vertical wheel steps. Positive `dy` is up and positive `dx` is right.
 
 ## Examples
 
@@ -201,6 +205,15 @@ not support unauthenticated connections, there is also a password of `pass` on
 the example.
 
     python example_push.py
+
+### Cursor shapes
+
+Clients that advertise the standard Cursor pseudo-encoding can receive a
+server-defined pointer shape. Supply a `VNCCursor` when creating the server, or
+call `change_cursor` with one later. `change_cursor_surface` snapshots an
+ARGB32 or RGB24 Cairo image surface and derives its visibility mask from alpha.
+
+    python example_cursor.py
 
 
 ### Verbose logging
