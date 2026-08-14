@@ -308,6 +308,7 @@ class VNCConnection(socketserver.BaseRequestHandler):
 
         # Button states
         self.pointer_buttons = 0
+        self.pointer_wire_buttons = 0
         self.pointer_xpos = -1
         self.pointer_ypos = -1
 

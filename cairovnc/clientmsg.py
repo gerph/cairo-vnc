@@ -7,7 +7,7 @@ import time
 
 from .constants import VNCConstants
 from .regions import RegionRequest
-from .events import VNCEventMove, VNCEventClick, VNCEventKey
+from .events import VNCEventMove, VNCEventClick, VNCEventKey, VNCEventScroll
 
 
 message_handlers = {}
@@ -91,20 +91,34 @@ def msg_PointerEvent(connection, payload):
     if not connection.options.read_only:
         connection.log("PointerEvent: buttons=%i, pos=%i,%i" % (buttons, xpos, ypos))
 
+        # RFB represents wheels as transient buttons. They are not ordinary
+        # pointer state: presses create scroll events and matching releases
+        # are deliberately silent.
+        wheel_mask = 0x78
+        ordinary_buttons = buttons & ~wheel_mask
+        previous_wire_buttons = getattr(connection, 'pointer_wire_buttons', 0)
+        wheel_presses = (buttons & wheel_mask) & ~previous_wire_buttons
+        connection.pointer_wire_buttons = buttons
+
         # We want to be able to discard movement events and report clicks separately
         # First we deliver any movement events.
         if xpos != connection.pointer_xpos or ypos != connection.pointer_ypos:
-            connection.queue_event(VNCEventMove(xpos, ypos, buttons))
+            connection.queue_event(VNCEventMove(xpos, ypos, ordinary_buttons))
             connection.pointer_xpos = xpos
             connection.pointer_ypos = ypos
-        diff = connection.pointer_buttons ^ buttons
-        connection.pointer_buttons = buttons
+        diff = connection.pointer_buttons ^ ordinary_buttons
+        connection.pointer_buttons = ordinary_buttons
         if diff:
             # Buttons changed, so we need to deliver click or release events
             for button in range(0, 8):
                 bit = (1<<button)
                 if diff & bit:
-                    connection.queue_event(VNCEventClick(xpos, ypos, button, buttons & bit))
+                    connection.queue_event(VNCEventClick(xpos, ypos, button, ordinary_buttons & bit))
+
+        for bit, dx, dy in ((0x08, 0, 1), (0x10, 0, -1),
+                            (0x20, -1, 0), (0x40, 1, 0)):
+            if wheel_presses & bit:
+                connection.queue_event(VNCEventScroll(xpos, ypos, dx, dy))
 
 
 @register_msg(VNCConstants.ClientMsgType_ClientCutText, payload_size=3 + 4)
