@@ -206,6 +206,15 @@ the example.
 
     python example_push.py
 
+### Cursor shapes
+
+Clients that advertise the standard Cursor pseudo-encoding can receive a
+server-defined pointer shape. Supply a `VNCCursor` when creating the server, or
+call `change_cursor` with one later. `change_cursor_surface` snapshots an
+ARGB32 or RGB24 Cairo image surface and derives its visibility mask from alpha.
+
+    python example_cursor.py
+
 
 ### Verbose logging
 
