@@ -165,12 +165,13 @@ class VNCEventScroll(VNCEvent):
 
 
 class VNCEventClipboard(VNCEvent):
-    """A text clipboard update received from a client."""
+    """A clipboard update received from a client."""
     name = 'clipboard'
 
-    def __init__(self, text):
+    def __init__(self, clipboard):
         super(VNCEventClipboard, self).__init__()
-        self.text = text
+        self.clipboard = clipboard
+        self.text = clipboard.text
 
     def __repr__(self):
-        return "<{}({!r})>".format(self.__class__.__name__, self.text)
+        return "<{}({!r})>".format(self.__class__.__name__, self.clipboard.formats)

@@ -7,6 +7,7 @@ from cairovnc.events import VNCEventClick, VNCEventClipboard, VNCEventMove, VNCE
 
 class Options(object):
     read_only = False
+    clipboard_maximum_size = 20 * 1024 * 1024
 
 
 class Connection(object):

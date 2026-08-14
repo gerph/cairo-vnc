@@ -35,9 +35,18 @@ from .clientmsg import dispatch_msg
 from .regions import Regions, RegionRequest
 from .security import get_security_types
 from .cursor import VNCCursor
+from .clipboard import VNCClipboard
+from .events import VNCEventClipboard
 
 
 __version__ = '0.2.0'
+
+
+def clipboard_value(value):
+    """Normalise legacy text or a VNCClipboard instance to VNCClipboard."""
+    if isinstance(value, VNCClipboard):
+        return value
+    return VNCClipboard({VNCClipboard.Format_Text: value})
 
 
 class CairoVNCOptions(object):
@@ -94,6 +103,9 @@ class CairoVNCOptions(object):
         # The zlib compression level used for framebuffer rectangles.
         self.zlib_level = 6
 
+        # Maximum uncompressed size accepted for each extended clipboard format.
+        self.clipboard_maximum_size = 20 * 1024 * 1024
+
     def copy(self):
         obj = CairoVNCOptions(host=self.host,
                               port=self.port,
@@ -109,6 +121,7 @@ class CairoVNCOptions(object):
         obj.push_requests = self.push_requests
         obj.verbose = self.verbose
         obj.zlib_level = self.zlib_level
+        obj.clipboard_maximum_size = self.clipboard_maximum_size
 
         return obj
 
@@ -328,6 +341,8 @@ class VNCConnection(socketserver.BaseRequestHandler):
         self.changed_display = False
         self.changed_name = False
         self.changed_clipboard = self.server.clipboard is not None
+        self.extended_clipboard_capabilities = None
+        self.extended_clipboard_limits = {}
 
         # The capabilities for communicating with the client
         self.capabilities = set([])
@@ -788,17 +803,161 @@ class VNCConnection(socketserver.BaseRequestHandler):
         self.capabilities = set(capabilities)
         self.options.push_requests = (self.server.options.push_requests or
                                       VNCConstants.PseudoEncoding_Apple1011 in self.capabilities)
+        if VNCConstants.PseudoEncoding_ExtendedClipboard in self.capabilities:
+            self.send_extended_clipboard_capabilities()
 
     def send_clipboard(self):
-        """Send the server's current text clipboard using ServerCutText."""
-        text = self.server.clipboard
-        if text is None:
+        """Send the server's current clipboard in the client's supported form."""
+        if VNCConstants.PseudoEncoding_ExtendedClipboard in self.capabilities:
+            self.send_extended_clipboard_action(VNCConstants.Clipboard_Action_Notify,
+                                                self.server.clipboard.format_flags())
             return
-        text_encoded = text.encode('iso-8859-1')
+
+        # Clients without the extension retain the standard Latin-1 behaviour.
+        text = self.server.clipboard
+        if text is None or text.text is None:
+            return
+        try:
+            text_encoded = text.text.encode('iso-8859-1')
+        except UnicodeEncodeError:
+            self.log("ServerCutText: clipboard text cannot be represented in ISO-8859-1")
+            return
         message = struct.pack('>B3sL', VNCConstants.ServerMsgType_ServerCutText,
                               b'\0\0\0', len(text_encoded)) + text_encoded
-        self.log("ServerCutText: textlen=%i, text=%r" % (len(text_encoded), text))
+        self.log("ServerCutText: textlen=%i, text=%r" % (len(text_encoded), text.text))
         self.write(message)
+
+    def send_extended_clipboard_message(self, flags, data=b''):
+        """Send an extended ServerCutText message with a bounded payload."""
+        payload = struct.pack('>L', flags) + data
+        message = struct.pack('>B3sl', VNCConstants.ServerMsgType_ServerCutText,
+                              b'\0\0\0', -len(payload)) + payload
+        self.write(message)
+
+    def send_extended_clipboard_capabilities(self):
+        """Advertise the extended clipboard formats and actions this server supports."""
+        formats = VNCClipboard.Format_Text | VNCClipboard.Format_RTF | VNCClipboard.Format_HTML
+        actions = (VNCConstants.Clipboard_Action_Caps |
+                   VNCConstants.Clipboard_Action_Request |
+                   VNCConstants.Clipboard_Action_Peek |
+                   VNCConstants.Clipboard_Action_Notify |
+                   VNCConstants.Clipboard_Action_Provide)
+        # Zero unsolicited sizes require an explicit notify/request exchange.
+        sizes = struct.pack('>LLL', 0, 0, 0)
+        self.send_extended_clipboard_message(formats | actions |
+                                             VNCConstants.Clipboard_Action_Caps,
+                                             zlib.compress(sizes))
+
+    def send_extended_clipboard_action(self, action, formats):
+        self.send_extended_clipboard_message(action | formats)
+
+    def send_extended_clipboard_provide(self, requested_formats):
+        clipboard = self.server.clipboard
+        formats = clipboard.format_flags() & requested_formats
+        data = []
+        for clipboard_format in range(16):
+            bit = 1 << clipboard_format
+            if formats & bit:
+                value = clipboard.wire_data(bit)
+                data.append(struct.pack('>L', len(value)))
+                data.append(value)
+        self.send_extended_clipboard_message(formats | VNCConstants.Clipboard_Action_Provide,
+                                             zlib.compress(b''.join(data)))
+
+    def receive_extended_clipboard(self, payload):
+        """Process an already-read extended ClientCutText payload."""
+        if VNCConstants.PseudoEncoding_ExtendedClipboard not in self.capabilities:
+            self.log("ClientCutText: extended clipboard was not negotiated")
+            return
+        if len(payload) < 4:
+            self.log("ClientCutText: short extended clipboard payload")
+            return
+        flags, = struct.unpack('>L', payload[:4])
+        formats = flags & 0xffff
+        action = flags & 0x1f000000
+        data = payload[4:]
+        if flags & VNCConstants.Clipboard_Action_Caps:
+            self.receive_extended_clipboard_capabilities(formats, data)
+        elif action == VNCConstants.Clipboard_Action_Request:
+            self.send_extended_clipboard_provide(formats)
+        elif action == VNCConstants.Clipboard_Action_Peek:
+            self.send_extended_clipboard_action(VNCConstants.Clipboard_Action_Notify,
+                                                self.server.clipboard.format_flags())
+        elif action == VNCConstants.Clipboard_Action_Notify:
+            self.send_extended_clipboard_action(VNCConstants.Clipboard_Action_Request,
+                                                formats & self.extended_clipboard_formats())
+        elif action == VNCConstants.Clipboard_Action_Provide:
+            self.receive_extended_clipboard_provide(formats, data)
+        else:
+            self.log("ClientCutText: unsupported extended clipboard flags &{:x}".format(flags))
+
+    def extended_clipboard_formats(self):
+        return VNCClipboard.Format_Text | VNCClipboard.Format_RTF | VNCClipboard.Format_HTML
+
+    def receive_extended_clipboard_capabilities(self, formats, data):
+        expected = 4 * sum(1 for bit in range(16) if formats & (1 << bit))
+        decoded = self.decompress_extended_clipboard(data, expected)
+        if decoded is None or len(decoded) != expected:
+            self.log("ClientCutText: invalid extended clipboard capabilities")
+            return
+        self.extended_clipboard_capabilities = formats
+        self.extended_clipboard_limits = {}
+        offset = 0
+        for bit in range(16):
+            if formats & (1 << bit):
+                maximum, = struct.unpack('>L', decoded[offset:offset + 4])
+                self.extended_clipboard_limits[1 << bit] = maximum
+                offset += 4
+
+    def receive_extended_clipboard_provide(self, formats, data):
+        decoded = self.decompress_extended_clipboard(data, self.options.clipboard_maximum_size * 3 + 64)
+        if decoded is None:
+            return
+        values = {}
+        offset = 0
+        for bit in range(16):
+            if formats & (1 << bit):
+                if offset + 4 > len(decoded):
+                    self.log("ClientCutText: truncated extended clipboard format")
+                    return
+                size, = struct.unpack('>L', decoded[offset:offset + 4])
+                offset += 4
+                if size > self.options.clipboard_maximum_size or offset + size > len(decoded):
+                    self.log("ClientCutText: oversized extended clipboard format")
+                    return
+                if (1 << bit) in VNCClipboard.Formats:
+                    value = decoded[offset:offset + size]
+                    if (1 << bit) == VNCClipboard.Format_Text:
+                        if not value.endswith(b'\0'):
+                            self.log("ClientCutText: UTF-8 clipboard text has no terminating null")
+                            return
+                        value = value[:-1]
+                    values[1 << bit] = value
+                offset += size
+        if offset != len(decoded):
+            self.log("ClientCutText: trailing extended clipboard data")
+            return
+        try:
+            clipboard = VNCClipboard(values)
+        except (TypeError, UnicodeDecodeError, ValueError) as exc:
+            self.log("ClientCutText: invalid extended clipboard data: {}".format(exc))
+            return
+        if clipboard.formats and not self.options.read_only:
+            self.queue_event(VNCEventClipboard(clipboard))
+
+    def decompress_extended_clipboard(self, data, maximum_size):
+        try:
+            decompressor = zlib.decompressobj()
+            decoded = decompressor.decompress(data, maximum_size + 1)
+            if decompressor.unconsumed_tail:
+                raise ValueError('decompressed data exceeds the maximum size')
+            decoded += decompressor.flush()
+            if len(decoded) > maximum_size or decompressor.unused_data:
+                raise ValueError('invalid compressed data')
+            return decoded
+        except (ValueError, zlib.error) as exc:
+            self.log("ClientCutText: invalid extended clipboard compression: {}".format(exc))
+            return None
 
     def queue_event(self, event):
         """
@@ -1037,8 +1196,7 @@ class VNCServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     def change_clipboard(self, text):
         """Change the text clipboard and notify connected clients."""
         # Encoding here validates the value before any client is notified.
-        text.encode('iso-8859-1')
-        self.clipboard = text
+        self.clipboard = clipboard_value(text)
         for client in self.clients:
             client.change_clipboard()
 
@@ -1064,9 +1222,7 @@ class CairoVNCServer(object):
         self.surface = surface
         self.surface_lock = surface_lock
         self.cursor = cursor
-        self.clipboard = clipboard
-        if self.clipboard is not None:
-            self.clipboard.encode('iso-8859-1')
+        self.clipboard = clipboard_value(clipboard) if clipboard is not None else None
 
         # The object currently available for serving
         self.server = None
@@ -1192,10 +1348,9 @@ class CairoVNCServer(object):
 
     def change_clipboard(self, text):
         """Change the text clipboard delivered to connected VNC clients."""
-        text.encode('iso-8859-1')
-        self.clipboard = text
+        self.clipboard = clipboard_value(text)
         if self.server:
-            self.server.change_clipboard(text)
+            self.server.change_clipboard(self.clipboard)
 
     def get_event(self, timeout=None):
         """

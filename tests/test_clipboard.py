@@ -1,7 +1,9 @@
 import struct
 import unittest
+import zlib
 
 from cairovnc import CairoVNCOptions, CairoVNCServer, VNCConnection
+from cairovnc.clipboard import VNCClipboard
 from cairovnc.constants import VNCConstants
 
 
@@ -9,13 +11,33 @@ class Connection(object):
     send_clipboard = getattr(VNCConnection.send_clipboard, 'im_func', VNCConnection.send_clipboard)
     change_clipboard = getattr(VNCConnection.change_clipboard, 'im_func', VNCConnection.change_clipboard)
     setup = getattr(VNCConnection.setup, 'im_func', VNCConnection.setup)
+    set_capabilities = getattr(VNCConnection.set_capabilities, 'im_func', VNCConnection.set_capabilities)
+    send_extended_clipboard_capabilities = getattr(VNCConnection.send_extended_clipboard_capabilities, 'im_func', VNCConnection.send_extended_clipboard_capabilities)
+    send_extended_clipboard_message = getattr(VNCConnection.send_extended_clipboard_message, 'im_func', VNCConnection.send_extended_clipboard_message)
+    send_extended_clipboard_action = getattr(VNCConnection.send_extended_clipboard_action, 'im_func', VNCConnection.send_extended_clipboard_action)
+    send_extended_clipboard_provide = getattr(VNCConnection.send_extended_clipboard_provide, 'im_func', VNCConnection.send_extended_clipboard_provide)
+    receive_extended_clipboard = getattr(VNCConnection.receive_extended_clipboard, 'im_func', VNCConnection.receive_extended_clipboard)
+    receive_extended_clipboard_capabilities = getattr(VNCConnection.receive_extended_clipboard_capabilities, 'im_func', VNCConnection.receive_extended_clipboard_capabilities)
+    receive_extended_clipboard_provide = getattr(VNCConnection.receive_extended_clipboard_provide, 'im_func', VNCConnection.receive_extended_clipboard_provide)
+    decompress_extended_clipboard = getattr(VNCConnection.decompress_extended_clipboard, 'im_func', VNCConnection.decompress_extended_clipboard)
+    extended_clipboard_formats = getattr(VNCConnection.extended_clipboard_formats, 'im_func', VNCConnection.extended_clipboard_formats)
 
     def __init__(self, text):
-        self.server = type('Server', (object,), {'clipboard': text})()
+        self.server = type('Server', (object,), {
+            'clipboard': VNCClipboard({VNCClipboard.Format_Text: text}) if text is not None else None,
+            'options': CairoVNCOptions()
+        })()
+        self.options = self.server.options.copy()
+        self.options.read_only = False
+        self.capabilities = set()
         self.messages = []
+        self.events = []
         self.write = self.messages.append
         self.log = lambda message: None
+        self.queue_event = self.events.append
         self.changed_clipboard = False
+        self.extended_clipboard_capabilities = None
+        self.extended_clipboard_limits = {}
 
 
 class ClipboardTests(unittest.TestCase):
@@ -25,6 +47,72 @@ class ClipboardTests(unittest.TestCase):
         expected = struct.pack('>B3sL', VNCConstants.ServerMsgType_ServerCutText,
                                b'\0\0\0', 6) + b'hello\xa3'
         self.assertEqual([expected], connection.messages)
+
+    def test_extended_capabilities_are_sent_after_negotiation(self):
+        connection = Connection(u'hello')
+        connection.set_capabilities([VNCConstants.PseudoEncoding_ExtendedClipboard])
+        message = connection.messages[0]
+        _, _, length = struct.unpack('>B3sl', message[:8])
+        self.assertLess(length, 0)
+        flags, = struct.unpack('>L', message[8:12])
+        self.assertTrue(flags & VNCConstants.Clipboard_Action_Caps)
+        self.assertEqual(VNCClipboard.Format_Text | VNCClipboard.Format_RTF | VNCClipboard.Format_HTML,
+                         flags & 0xffff)
+        self.assertEqual(b'\0' * 12, zlib.decompress(message[12:]))
+
+    def test_extended_provide_contains_utf8_text_rtf_and_html(self):
+        connection = Connection(u'hello\n\xa3')
+        connection.server.clipboard.set(VNCClipboard.Format_RTF, b'{\\rtf1}')
+        connection.server.clipboard.set(VNCClipboard.Format_HTML, b'<b>hello</b>')
+        formats = connection.server.clipboard.format_flags()
+        connection.send_extended_clipboard_provide(formats)
+        message = connection.messages[0]
+        flags, = struct.unpack('>L', message[8:12])
+        self.assertEqual(formats | VNCConstants.Clipboard_Action_Provide, flags)
+        payload = zlib.decompress(message[12:])
+        values = []
+        offset = 0
+        for unused in range(3):
+            size, = struct.unpack('>L', payload[offset:offset + 4])
+            offset += 4
+            values.append(payload[offset:offset + size])
+            offset += size
+        self.assertEqual([u'hello\r\n\xa3'.encode('utf-8') + b'\0',
+                          b'{\\rtf1}', b'<b>hello</b>'], values)
+
+    def test_extended_provide_is_queued_with_supported_formats(self):
+        connection = Connection(None)
+        formats = VNCClipboard.Format_Text | VNCClipboard.Format_RTF | VNCClipboard.Format_HTML
+        data = (struct.pack('>L', 8) + u'hello\xa3'.encode('utf-8') + b'\0' +
+                struct.pack('>L', 7) + b'{\\rtf1}' +
+                struct.pack('>L', 8) + b'<b>x</b>')
+        connection.capabilities.add(VNCConstants.PseudoEncoding_ExtendedClipboard)
+        connection.receive_extended_clipboard(struct.pack('>L', formats |
+                                                           VNCConstants.Clipboard_Action_Provide) +
+                                              zlib.compress(data))
+        clipboard = connection.events[0].clipboard
+        self.assertEqual(u'hello\xa3', clipboard.text)
+        self.assertEqual(b'{\\rtf1}', clipboard.formats[VNCClipboard.Format_RTF])
+        self.assertEqual(b'<b>x</b>', clipboard.formats[VNCClipboard.Format_HTML])
+
+    def test_extended_notify_requests_supported_formats(self):
+        connection = Connection(None)
+        connection.capabilities.add(VNCConstants.PseudoEncoding_ExtendedClipboard)
+        connection.receive_extended_clipboard(struct.pack(
+            '>L', VNCClipboard.Format_Text | VNCClipboard.Format_RTF |
+            VNCConstants.Clipboard_Action_Notify))
+        flags, = struct.unpack('>L', connection.messages[0][8:12])
+        self.assertEqual(VNCClipboard.Format_Text | VNCClipboard.Format_RTF |
+                         VNCConstants.Clipboard_Action_Request, flags)
+
+    def test_extended_request_receives_provide(self):
+        connection = Connection(u'hello')
+        connection.capabilities.add(VNCConstants.PseudoEncoding_ExtendedClipboard)
+        connection.receive_extended_clipboard(struct.pack(
+            '>L', VNCClipboard.Format_Text | VNCConstants.Clipboard_Action_Request))
+        flags, = struct.unpack('>L', connection.messages[0][8:12])
+        self.assertEqual(VNCClipboard.Format_Text |
+                         VNCConstants.Clipboard_Action_Provide, flags)
 
     def test_change_clipboard_marks_connection_pending(self):
         connection = Connection(None)
@@ -41,9 +129,9 @@ class ClipboardTests(unittest.TestCase):
     def test_public_server_changes_clipboard_before_start(self):
         server = CairoVNCServer(None)
         server.change_clipboard(u'hello')
-        self.assertEqual(u'hello', server.clipboard)
+        self.assertEqual(u'hello', server.clipboard.text)
 
-    def test_clipboard_must_be_latin_one_text(self):
-        server = CairoVNCServer(None)
-        with self.assertRaises(UnicodeEncodeError):
-            server.change_clipboard(u'\u20ac')
+    def test_legacy_client_does_not_receive_unrepresentable_text(self):
+        connection = Connection(u'\u20ac')
+        connection.send_clipboard()
+        self.assertEqual([], connection.messages)
