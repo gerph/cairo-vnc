@@ -3,14 +3,16 @@ stages:
 
 python27:
   stage: test
-  image: python:2.7
+  tags:
+    - linux-wxwidgets
   script:
-    - python -m unittest discover -s tests -v
-    - python -m compileall -q cairovnc tests example_*.py
+    - python2 -m unittest discover -s tests -v
+    - python2 -m compileall -q cairovnc tests example_*.py
 
 python3:
   stage: test
-  image: python:3
+  tags:
+    - linux-wxwidgets
   script:
-    - python -m unittest discover -s tests -v
-    - python -m compileall -q cairovnc tests example_*.py
+    - python3 -m unittest discover -s tests -v
+    - python3 -m compileall -q cairovnc tests example_*.py
