@@ -1,8 +1,8 @@
 import struct
 import unittest
 
-from cairovnc.clientmsg import msg_PointerEvent
-from cairovnc.events import VNCEventClick, VNCEventMove, VNCEventScroll
+from cairovnc.clientmsg import msg_ClientCutText, msg_PointerEvent
+from cairovnc.events import VNCEventClick, VNCEventClipboard, VNCEventMove, VNCEventScroll
 
 
 class Options(object):
@@ -18,12 +18,17 @@ class Connection(object):
         self.pointer_xpos = -1
         self.pointer_ypos = -1
         self.events = []
+        self.payload_timeout = 1
+        self.clipboard_data = None
 
     def log(self, message):
         pass
 
     def queue_event(self, event):
         self.events.append(event)
+
+    def read(self, size, timeout):
+        return self.clipboard_data
 
 
 def pointer(buttons, x=10, y=20):
@@ -81,3 +86,19 @@ class PointerEventTests(unittest.TestCase):
         self.assertEqual([(0, True), (0, False)],
                          [(event.button, event.down) for event in clicks])
         self.assertEqual(0, connection.pointer_buttons)
+
+    def test_client_clipboard_is_queued_as_text(self):
+        connection = Connection()
+        connection.clipboard_data = b'hello\xa3'
+        msg_ClientCutText(connection, struct.pack('>3sL', b'\0\0\0',
+                                                   len(connection.clipboard_data)))
+        self.assertEqual(1, len(connection.events))
+        self.assertIsInstance(connection.events[0], VNCEventClipboard)
+        self.assertEqual(u'hello\xa3', connection.events[0].text)
+
+    def test_read_only_suppresses_client_clipboard(self):
+        connection = Connection(True)
+        connection.clipboard_data = b'private'
+        msg_ClientCutText(connection, struct.pack('>3sL', b'\0\0\0',
+                                                   len(connection.clipboard_data)))
+        self.assertEqual([], connection.events)

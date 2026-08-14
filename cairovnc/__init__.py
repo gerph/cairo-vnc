@@ -327,6 +327,7 @@ class VNCConnection(socketserver.BaseRequestHandler):
         # Changes that are pending
         self.changed_display = False
         self.changed_name = False
+        self.changed_clipboard = self.server.clipboard is not None
 
         # The capabilities for communicating with the client
         self.capabilities = set([])
@@ -668,6 +669,10 @@ class VNCConnection(socketserver.BaseRequestHandler):
                     self.options.display_name = self.server.options.display_name
                 self.changed_name = False
 
+            if self.changed_clipboard:
+                self.send_clipboard()
+                self.changed_clipboard = False
+
             # If they requested some region to be drawn, so we should dispatch
             # a frame buffer update.
             # This throttling ensures that we won't be repeatedly trying to get data
@@ -784,6 +789,17 @@ class VNCConnection(socketserver.BaseRequestHandler):
         self.options.push_requests = (self.server.options.push_requests or
                                       VNCConstants.PseudoEncoding_Apple1011 in self.capabilities)
 
+    def send_clipboard(self):
+        """Send the server's current text clipboard using ServerCutText."""
+        text = self.server.clipboard
+        if text is None:
+            return
+        text_encoded = text.encode('iso-8859-1')
+        message = struct.pack('>B3sL', VNCConstants.ServerMsgType_ServerCutText,
+                              b'\0\0\0', len(text_encoded)) + text_encoded
+        self.log("ServerCutText: textlen=%i, text=%r" % (len(text_encoded), text))
+        self.write(message)
+
     def queue_event(self, event):
         """
         Insert an event into the queue for the animator.
@@ -822,6 +838,10 @@ class VNCConnection(socketserver.BaseRequestHandler):
         """The cursor has changed and should accompany the next update."""
         self.changed_cursor = True
 
+    def change_clipboard(self):
+        """The server clipboard changed and should be sent to this client."""
+        self.changed_clipboard = True
+
 
 class NullLock(object):
     """
@@ -849,6 +869,9 @@ class VNCServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         self.surface = kwargs.pop('surface', None)
         self.surface_lock = kwargs.pop('surface_lock', None) or NullLock()
         self.cursor = kwargs.pop('cursor', None)
+        self.clipboard = kwargs.pop('clipboard', None)
+        if self.clipboard is not None:
+            self.clipboard.encode('iso-8859-1')
         self.surface_data_lock = threading.Lock()
 
         self.event_queue = queue.Queue(self.options.event_queue_length)
@@ -1011,6 +1034,14 @@ class VNCServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         for client in self.clients:
             client.change_cursor()
 
+    def change_clipboard(self, text):
+        """Change the text clipboard and notify connected clients."""
+        # Encoding here validates the value before any client is notified.
+        text.encode('iso-8859-1')
+        self.clipboard = text
+        for client in self.clients:
+            client.change_clipboard()
+
 
 class CairoVNCServer(object):
     """
@@ -1025,13 +1056,17 @@ class CairoVNCServer(object):
     server_class = VNCServer
     event_polling_period = 0.5
 
-    def __init__(self, surface, host='', port=5902, surface_lock=None, options=None, cursor=None):
+    def __init__(self, surface, host='', port=5902, surface_lock=None, options=None, cursor=None,
+                 clipboard=None):
         if options is None:
             options = CairoVNCOptions(host=host, port=port)
         self.options = options
         self.surface = surface
         self.surface_lock = surface_lock
         self.cursor = cursor
+        self.clipboard = clipboard
+        if self.clipboard is not None:
+            self.clipboard.encode('iso-8859-1')
 
         # The object currently available for serving
         self.server = None
@@ -1050,7 +1085,8 @@ class CairoVNCServer(object):
             self.server = self.server_class((self.options.host, self.options.port),
                                              self.connection_class,
                                              surface=self.surface, surface_lock=self.surface_lock,
-                                             options=self.options, cursor=self.cursor)
+                                             options=self.options, cursor=self.cursor,
+                                             clipboard=self.clipboard)
 
     def stop(self):
         """
@@ -1153,6 +1189,13 @@ class CairoVNCServer(object):
     def change_cursor_surface(self, surface, hotspot=(0, 0), surface_lock=None):
         """Create a cursor from a Cairo surface and make it current."""
         self.change_cursor(VNCCursor.from_surface(surface, hotspot, surface_lock))
+
+    def change_clipboard(self, text):
+        """Change the text clipboard delivered to connected VNC clients."""
+        text.encode('iso-8859-1')
+        self.clipboard = text
+        if self.server:
+            self.server.change_clipboard(text)
 
     def get_event(self, timeout=None):
         """

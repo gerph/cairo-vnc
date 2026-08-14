@@ -105,6 +105,9 @@ This event delivers a pointer click or release; it is the pointer analogue of th
 This event delivers a pointer-wheel step.
     * Property `x`, `y`: Contains the pointer position for the wheel event.
     * Property `dx`, `dy`: Horizontal and vertical wheel steps. Positive `dy` is up and positive `dx` is right.
+* `VNCEventClipboard`: (name `clipboard`) \
+This event delivers text supplied by a client through the standard RFB clipboard message.
+    * Property `text`: Contains the ISO-8859-1 text supplied by the client.
 
 ## Examples
 
@@ -214,6 +217,14 @@ call `change_cursor` with one later. `change_cursor_surface` snapshots an
 ARGB32 or RGB24 Cairo image surface and derives its visibility mask from alpha.
 
     python example_cursor.py
+
+### Clipboard text
+
+Supply an initial `clipboard` value when creating the server, or use
+`change_clipboard(text)` to update connected clients. Clipboard updates from
+writable clients are delivered as `VNCEventClipboard` events. The standard RFB
+clipboard message uses ISO-8859-1 text; extended clipboard formats are not
+currently supported.
 
 
 ### Verbose logging

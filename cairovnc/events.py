@@ -10,6 +10,9 @@ Mouse events:
     Movement events will always be delivered first, followed by any click event.
     Click events describe the transition of the mouse buttons in the same manner as the key events,
     although without auto-repeat.
+
+Clipboard events:
+    Report text supplied by a client through the standard RFB clipboard message.
 """
 
 import time
@@ -159,3 +162,15 @@ class VNCEventScroll(VNCEvent):
         return "<{}({}, {}, dx {}, dy {})>".format(self.__class__.__name__,
                                                     self.x, self.y, self.dx,
                                                     self.dy)
+
+
+class VNCEventClipboard(VNCEvent):
+    """A text clipboard update received from a client."""
+    name = 'clipboard'
+
+    def __init__(self, text):
+        super(VNCEventClipboard, self).__init__()
+        self.text = text
+
+    def __repr__(self):
+        return "<{}({!r})>".format(self.__class__.__name__, self.text)

@@ -7,7 +7,7 @@ import time
 
 from .constants import VNCConstants
 from .regions import RegionRequest
-from .events import VNCEventMove, VNCEventClick, VNCEventKey, VNCEventScroll
+from .events import VNCEventMove, VNCEventClick, VNCEventKey, VNCEventScroll, VNCEventClipboard
 
 
 message_handlers = {}
@@ -131,4 +131,4 @@ def msg_ClientCutText(connection, payload):
     if not connection.options.read_only:
         text = response.decode('iso-8859-1')
         connection.log("ClientCutText: textlen=%i, text=%r" % (textlen, text))
-        # FIXME: Deliver this data
+        connection.queue_event(VNCEventClipboard(text))
