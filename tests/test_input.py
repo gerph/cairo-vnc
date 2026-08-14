@@ -68,3 +68,16 @@ class PointerEventTests(unittest.TestCase):
         clicks = [event for event in connection.events if isinstance(event, VNCEventClick)]
         self.assertEqual([(7, True), (7, False)],
                          [(event.button, event.down) for event in clicks])
+
+    def test_normal_click_after_scroll_is_unchanged(self):
+        connection = Connection()
+        msg_PointerEvent(connection, pointer(0x08))
+        msg_PointerEvent(connection, pointer(0))
+        msg_PointerEvent(connection, pointer(0x40))
+        msg_PointerEvent(connection, pointer(0))
+        msg_PointerEvent(connection, pointer(0x01))
+        msg_PointerEvent(connection, pointer(0))
+        clicks = [event for event in connection.events if isinstance(event, VNCEventClick)]
+        self.assertEqual([(0, True), (0, False)],
+                         [(event.button, event.down) for event in clicks])
+        self.assertEqual(0, connection.pointer_buttons)

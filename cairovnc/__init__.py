@@ -1030,7 +1030,7 @@ class CairoVNCServer(object):
             options = CairoVNCOptions(host=host, port=port)
         self.options = options
         self.surface = surface
-        self.surface_lock = None
+        self.surface_lock = surface_lock
         self.cursor = cursor
 
         # The object currently available for serving

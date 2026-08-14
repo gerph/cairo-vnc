@@ -3,7 +3,7 @@ import sys
 import unittest
 import zlib
 
-from cairovnc import CairoVNCOptions, VNCConnection, VNCCursor
+from cairovnc import CairoVNCOptions, CairoVNCServer, VNCConnection, VNCCursor
 from cairovnc.constants import VNCConstants
 from cairovnc.errors import CairoVNCBadCursorError
 from cairovnc.pixeldata import PixelFormat
@@ -40,7 +40,19 @@ def connection(cursor):
     return client
 
 
+def cursor_rectangle(message):
+    message_type, padding, nrects = struct.unpack('>BBH', message[:4])
+    x, y, width, height, encoding = struct.unpack('>HHHHl', message[4:16])
+    return (message_type, padding, nrects, x, y, width, height, encoding,
+            message[16:])
+
+
 class CursorTests(unittest.TestCase):
+    def test_server_keeps_surface_lock(self):
+        lock = object()
+        server = CairoVNCServer(None, surface_lock=lock)
+        self.assertIs(lock, server.surface_lock)
+
     def test_validation(self):
         with self.assertRaises(CairoVNCBadCursorError):
             VNCCursor(1, 1, (1, 0), b'\0' * 4, b'\x80')
@@ -70,7 +82,7 @@ class CursorTests(unittest.TestCase):
         self.assertEqual(b'\x01\x02\x03\0', cursor.pixels[:4])
 
     def test_cursor_is_sent_only_to_capable_clients(self):
-        cursor = VNCCursor(1, 1, (0, 0), b'\x01\x02\x03\0', b'\x80')
+        cursor = VNCCursor(2, 1, (1, 0), b'\x01\x02\x03\0\x04\x05\x06\0', b'\xc0')
         client = connection(cursor)
         client.last_rows[0] = b'\0\0\0\0'
         client.update_framebuffer(RegionRequest(True, 0, 0, 1, 1))
@@ -78,12 +90,15 @@ class CursorTests(unittest.TestCase):
         client.changed_cursor = True
         client.set_capabilities([VNCConstants.PseudoEncoding_Cursor])
         client.update_framebuffer(RegionRequest(True, 0, 0, 1, 1))
-        self.assertEqual(1, struct.unpack('>H', client.messages[1][2:4])[0])
-        self.assertEqual(VNCConstants.PseudoEncoding_Cursor,
-                         struct.unpack('>l', client.messages[1][12:16])[0])
+        (_, _, nrects, x, y, width, height, encoding, payload) = cursor_rectangle(client.messages[1])
+        self.assertEqual(1, nrects)
+        self.assertEqual(cursor.hotspot + (cursor.width, cursor.height), (x, y, width, height))
+        self.assertEqual(VNCConstants.PseudoEncoding_Cursor, encoding)
+        self.assertEqual(cursor.pixels + cursor.mask, payload)
+        self.assertFalse(client.changed_cursor)
 
     def test_changed_cursor_is_delivered(self):
-        cursor = VNCCursor(1, 1, (0, 0), b'\x01\x02\x03\0', b'\x80')
+        cursor = VNCCursor(2, 1, (1, 0), b'\x01\x02\x03\0\x04\x05\x06\0', b'\xc0')
         client = connection(cursor)
         client.last_rows[0] = b'\0\0\0\0'
         client.set_capabilities([VNCConstants.PseudoEncoding_Cursor])
@@ -91,6 +106,12 @@ class CursorTests(unittest.TestCase):
         client.change_cursor()
         client.update_framebuffer(RegionRequest(True, 0, 0, 1, 1))
         self.assertEqual(2, len(client.messages))
+        (_, _, nrects, x, y, width, height, encoding, payload) = cursor_rectangle(client.messages[1])
+        self.assertEqual(1, nrects)
+        self.assertEqual(cursor.hotspot + (cursor.width, cursor.height), (x, y, width, height))
+        self.assertEqual(VNCConstants.PseudoEncoding_Cursor, encoding)
+        self.assertEqual(cursor.pixels + cursor.mask, payload)
+        self.assertFalse(client.changed_cursor)
 
     def test_cursor_pixels_use_client_pixel_format(self):
         cursor = VNCCursor(1, 1, (0, 0), b'\x11\x22\x33\0', b'\x80')
