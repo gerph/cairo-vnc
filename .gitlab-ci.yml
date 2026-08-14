@@ -1,0 +1,16 @@
+stages:
+  - test
+
+python27:
+  stage: test
+  image: python:2.7
+  script:
+    - python -m unittest discover -s tests -v
+    - python -m compileall -q cairovnc tests example_*.py
+
+python3:
+  stage: test
+  image: python:3
+  script:
+    - python -m unittest discover -s tests -v
+    - python -m compileall -q cairovnc tests example_*.py
