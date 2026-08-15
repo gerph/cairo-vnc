@@ -815,7 +815,8 @@ class VNCConnection(socketserver.BaseRequestHandler):
         """Send the server's current clipboard in the client's supported form."""
         if VNCConstants.PseudoEncoding_ExtendedClipboard in self.capabilities:
             self.send_extended_clipboard_action(VNCConstants.Clipboard_Action_Notify,
-                                                self.server.clipboard.format_flags())
+                                                self.server.clipboard.format_flags() &
+                                                self.sendable_extended_clipboard_formats())
             return
 
         # Clients without the extension retain the standard Latin-1 behaviour.
@@ -841,14 +842,15 @@ class VNCConnection(socketserver.BaseRequestHandler):
 
     def send_extended_clipboard_capabilities(self):
         """Advertise the extended clipboard formats and actions this server supports."""
-        formats = VNCClipboard.Format_Text | VNCClipboard.Format_RTF | VNCClipboard.Format_HTML
+        formats = self.extended_clipboard_formats()
         actions = (VNCConstants.Clipboard_Action_Caps |
                    VNCConstants.Clipboard_Action_Request |
                    VNCConstants.Clipboard_Action_Peek |
                    VNCConstants.Clipboard_Action_Notify |
                    VNCConstants.Clipboard_Action_Provide)
         # Zero unsolicited sizes require an explicit notify/request exchange.
-        sizes = struct.pack('>LLL', 0, 0, 0)
+        sizes = struct.pack('>' + 'L' * len(VNCClipboard.Formats),
+                            *([0] * len(VNCClipboard.Formats)))
         self.send_extended_clipboard_message(formats | actions |
                                              VNCConstants.Clipboard_Action_Caps,
                                              zlib.compress(sizes))
@@ -858,7 +860,8 @@ class VNCConnection(socketserver.BaseRequestHandler):
 
     def send_extended_clipboard_provide(self, requested_formats):
         clipboard = self.server.clipboard
-        formats = clipboard.format_flags() & requested_formats
+        formats = (clipboard.format_flags() & requested_formats &
+                   self.sendable_extended_clipboard_formats())
         data = []
         for clipboard_format in range(16):
             bit = 1 << clipboard_format
@@ -887,7 +890,8 @@ class VNCConnection(socketserver.BaseRequestHandler):
             self.send_extended_clipboard_provide(formats)
         elif action == VNCConstants.Clipboard_Action_Peek:
             self.send_extended_clipboard_action(VNCConstants.Clipboard_Action_Notify,
-                                                self.server.clipboard.format_flags())
+                                                self.server.clipboard.format_flags() &
+                                                self.sendable_extended_clipboard_formats())
         elif action == VNCConstants.Clipboard_Action_Notify:
             self.send_extended_clipboard_action(VNCConstants.Clipboard_Action_Request,
                                                 formats & self.extended_clipboard_formats())
@@ -897,7 +901,18 @@ class VNCConnection(socketserver.BaseRequestHandler):
             self.log("ClientCutText: unsupported extended clipboard flags &{:x}".format(flags))
 
     def extended_clipboard_formats(self):
-        return VNCClipboard.Format_Text | VNCClipboard.Format_RTF | VNCClipboard.Format_HTML
+        return sum(VNCClipboard.Formats)
+
+    def sendable_extended_clipboard_formats(self):
+        """Return formats the peer explicitly permits us to send."""
+        formats = self.extended_clipboard_formats()
+        # The standard default does not include DIB. Do not offer it unless the
+        # peer has sent a caps message granting a non-zero receive limit.
+        if (not self.extended_clipboard_capabilities or
+                not (self.extended_clipboard_capabilities & VNCClipboard.Format_DIB) or
+                not self.extended_clipboard_limits.get(VNCClipboard.Format_DIB, 0)):
+            formats &= ~VNCClipboard.Format_DIB
+        return formats
 
     def receive_extended_clipboard_capabilities(self, formats, data):
         expected = 4 * sum(1 for bit in range(16) if formats & (1 << bit))
@@ -1198,11 +1213,14 @@ class VNCServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
             client.change_cursor()
 
     def change_clipboard(self, text):
-        """Change the text clipboard and notify connected clients."""
-        # Encoding here validates the value before any client is notified.
+        """Change the clipboard and notify connected clients."""
         self.clipboard = clipboard_value(text)
         for client in self.clients:
             client.change_clipboard()
+
+    def change_clipboard_surface(self, surface, surface_lock=None):
+        """Snapshot a Cairo surface as DIBv5 clipboard data and notify clients."""
+        self.change_clipboard(VNCClipboard().set_dib_surface(surface, surface_lock))
 
 
 class CairoVNCServer(object):
@@ -1351,10 +1369,14 @@ class CairoVNCServer(object):
         self.change_cursor(VNCCursor.from_surface(surface, hotspot, surface_lock))
 
     def change_clipboard(self, text):
-        """Change the text clipboard delivered to connected VNC clients."""
+        """Change the clipboard delivered to connected VNC clients."""
         self.clipboard = clipboard_value(text)
         if self.server:
             self.server.change_clipboard(self.clipboard)
+
+    def change_clipboard_surface(self, surface, surface_lock=None):
+        """Snapshot a Cairo surface as DIBv5 clipboard data for connected clients."""
+        self.change_clipboard(VNCClipboard().set_dib_surface(surface, surface_lock))
 
     def get_event(self, timeout=None):
         """

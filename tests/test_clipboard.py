@@ -1,4 +1,5 @@
 import struct
+import sys
 import unittest
 import zlib
 
@@ -21,6 +22,9 @@ class Connection(object):
     receive_extended_clipboard_provide = getattr(VNCConnection.receive_extended_clipboard_provide, 'im_func', VNCConnection.receive_extended_clipboard_provide)
     decompress_extended_clipboard = getattr(VNCConnection.decompress_extended_clipboard, 'im_func', VNCConnection.decompress_extended_clipboard)
     extended_clipboard_formats = getattr(VNCConnection.extended_clipboard_formats, 'im_func', VNCConnection.extended_clipboard_formats)
+    sendable_extended_clipboard_formats = getattr(
+        VNCConnection.sendable_extended_clipboard_formats, 'im_func',
+        VNCConnection.sendable_extended_clipboard_formats)
 
     def __init__(self, text):
         self.server = type('Server', (object,), {
@@ -38,6 +42,13 @@ class Connection(object):
         self.changed_clipboard = False
         self.extended_clipboard_capabilities = None
         self.extended_clipboard_limits = {}
+
+
+def dib():
+    return struct.pack('<IiiHHIIiiIIIIIII36sIIIIIII',
+                       124, 1, -1, 1, 32, 3, 4, 0, 0, 0, 0,
+                       0x00ff0000, 0x0000ff00, 0x000000ff, 0xff000000,
+                       0x73524742, b'\0' * 36, 0, 0, 0, 4, 0, 0, 0) + b'\0\0\0\xff'
 
 
 class ClipboardTests(unittest.TestCase):
@@ -65,9 +76,10 @@ class ClipboardTests(unittest.TestCase):
         self.assertLess(length, 0)
         flags, = struct.unpack('>L', message[8:12])
         self.assertTrue(flags & VNCConstants.Clipboard_Action_Caps)
-        self.assertEqual(VNCClipboard.Format_Text | VNCClipboard.Format_RTF | VNCClipboard.Format_HTML,
+        self.assertEqual(VNCClipboard.Format_Text | VNCClipboard.Format_RTF |
+                         VNCClipboard.Format_HTML | VNCClipboard.Format_DIB,
                          flags & 0xffff)
-        self.assertEqual(b'\0' * 12, zlib.decompress(message[12:]))
+        self.assertEqual(b'\0' * 16, zlib.decompress(message[12:]))
 
     def test_extended_capabilities_are_received_with_limits(self):
         connection = Connection(None)
@@ -78,6 +90,68 @@ class ClipboardTests(unittest.TestCase):
         self.assertEqual({VNCClipboard.Format_Text: 1024,
                           VNCClipboard.Format_HTML: 2048},
                          connection.extended_clipboard_limits)
+
+    def test_dib_surface_creates_top_down_dibv5(self):
+        class Cairo(object):
+            FORMAT_ARGB32 = 0
+            FORMAT_RGB24 = 1
+        old_cairo = sys.modules.get('cairo')
+        sys.modules['cairo'] = Cairo
+        try:
+            class Surface(object):
+                def get_width(self): return 1
+                def get_height(self): return 1
+                def get_format(self): return Cairo.FORMAT_ARGB32
+                def get_stride(self): return 4
+                def get_data(self): return b'\x10\x20\x30\x80'
+                def flush(self): pass
+            surface = Surface()
+            clipboard = VNCClipboard().set_dib_surface(surface)
+            server = CairoVNCServer(None)
+            server.change_clipboard_surface(surface)
+        finally:
+            if old_cairo is None:
+                del sys.modules['cairo']
+            else:
+                sys.modules['cairo'] = old_cairo
+        header = clipboard.dib[:124]
+        self.assertEqual((124, 1, -1, 1, 32, 3, 4),
+                         struct.unpack('<IiiHHII', header[:24]))
+        self.assertEqual(b'\x20\x40\x60\x80', clipboard.dib[124:])
+        self.assertEqual(clipboard.dib, server.clipboard.dib)
+
+    def test_dib_requires_peer_capability_and_limit(self):
+        clipboard = VNCClipboard().set_dib(dib())
+        connection = Connection(None)
+        connection.server.clipboard = clipboard
+        connection.send_extended_clipboard_provide(VNCClipboard.Format_DIB)
+        flags, = struct.unpack('>L', connection.messages[0][8:12])
+        self.assertEqual(VNCConstants.Clipboard_Action_Provide, flags)
+        connection.messages[:] = []
+        connection.capabilities.add(VNCConstants.PseudoEncoding_ExtendedClipboard)
+        connection.send_clipboard()
+        flags, = struct.unpack('>L', connection.messages[0][8:12])
+        self.assertEqual(VNCConstants.Clipboard_Action_Notify, flags)
+        connection.messages[:] = []
+        connection.extended_clipboard_capabilities = VNCClipboard.Format_DIB
+        connection.extended_clipboard_limits = {VNCClipboard.Format_DIB: 1024}
+        connection.send_extended_clipboard_provide(VNCClipboard.Format_DIB)
+        flags, = struct.unpack('>L', connection.messages[0][8:12])
+        self.assertEqual(VNCClipboard.Format_DIB | VNCConstants.Clipboard_Action_Provide,
+                         flags)
+
+    def test_invalid_dib_is_rejected(self):
+        with self.assertRaises(ValueError):
+            VNCClipboard().set_dib(b'not a DIB')
+
+    def test_received_dib_is_delivered_as_raw_dib(self):
+        connection = Connection(None)
+        connection.capabilities.add(VNCConstants.PseudoEncoding_ExtendedClipboard)
+        data = struct.pack('>L', len(dib())) + dib()
+        connection.receive_extended_clipboard(struct.pack(
+            '>L', VNCClipboard.Format_DIB | VNCConstants.Clipboard_Action_Provide) +
+                                              zlib.compress(data))
+        self.assertEqual(dib(), connection.events[0].clipboard.dib)
 
     def test_malformed_extended_capabilities_are_rejected(self):
         connection = Connection(None)
@@ -178,7 +252,7 @@ class ClipboardTests(unittest.TestCase):
     def test_extended_clipboard_ignores_unknown_formats(self):
         connection = Connection(None)
         connection.capabilities.add(VNCConstants.PseudoEncoding_ExtendedClipboard)
-        unknown = 1 << 3
+        unknown = 1 << 5
         text = b'hello\0'
         data = (struct.pack('>L', len(text)) + text +
                 struct.pack('>L', 3) + b'xyz')

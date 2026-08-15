@@ -225,10 +225,16 @@ Supply an initial `clipboard` value when creating the server, or use
 `change_clipboard(text)` to update connected clients. Text values work with
 legacy clients through ISO-8859-1 `ServerCutText`. Clients that advertise the
 Extended Clipboard pseudo-encoding receive UTF-8 text and may also exchange
-RTF and HTML using `VNCClipboard.Format_Text`, `VNCClipboard.Format_RTF`, and
-`VNCClipboard.Format_HTML`. Clipboard updates from writable clients are
-delivered as `VNCEventClipboard` events. DIB and file formats are not currently
-supported.
+RTF, HTML, and DIBv5 image data using `VNCClipboard.Format_Text`,
+`VNCClipboard.Format_RTF`, `VNCClipboard.Format_HTML`, and
+`VNCClipboard.Format_DIB`. Use `server.change_clipboard_surface(surface,
+surface_lock=None)` to snapshot an ARGB32 or RGB24 Cairo image surface, or
+construct a `VNCClipboard` and use `clipboard.set_dib(data)` for a
+pre-prepared top-down 32-bit DIBv5 without a file header. DIB is only offered
+to peers that explicitly advertise it with a non-zero receive limit. Clipboard
+updates from writable clients are delivered as `VNCEventClipboard` events;
+received DIB data is available as `event.clipboard.dib`. File formats are not
+currently supported.
 
 
 ### Verbose logging
