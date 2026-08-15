@@ -10,7 +10,7 @@ permissions:
 jobs:
   python3:
     name: Python 3.12
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - name: Set up Python
