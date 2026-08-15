@@ -21,12 +21,16 @@ class Connection(object):
         self.events = []
         self.payload_timeout = 1
         self.clipboard_data = None
+        self.closed = False
 
     def log(self, message):
         pass
 
     def queue_event(self, event):
         self.events.append(event)
+
+    def disconnect(self):
+        self.closed = True
 
     def read(self, size, timeout):
         return self.clipboard_data
@@ -102,4 +106,32 @@ class PointerEventTests(unittest.TestCase):
         connection.clipboard_data = b'private'
         msg_ClientCutText(connection, struct.pack('>3sL', b'\0\0\0',
                                                    len(connection.clipboard_data)))
+        self.assertEqual([], connection.events)
+
+    def test_extended_client_clipboard_is_routed(self):
+        connection = Connection()
+        connection.clipboard_data = b'\x01\0\0\0hello'
+        received = []
+        connection.receive_extended_clipboard = received.append
+        msg_ClientCutText(connection, struct.pack('>3sl', b'\0\0\0',
+                                                   -len(connection.clipboard_data)))
+        self.assertEqual([connection.clipboard_data], received)
+        self.assertEqual([], connection.events)
+
+    def test_oversized_client_clipboard_disconnects(self):
+        connection = Connection()
+        connection.options.clipboard_maximum_size = 10
+        msg_ClientCutText(connection, struct.pack('>3sl', b'\0\0\0', -95))
+        self.assertTrue(connection.closed)
+        connection = Connection()
+        connection.options.clipboard_maximum_size = 10
+        msg_ClientCutText(connection, struct.pack('>3sl', b'\0\0\0', 11))
+        self.assertTrue(connection.closed)
+
+    def test_extended_client_clipboard_timeout_is_ignored(self):
+        connection = Connection()
+        connection.clipboard_data = None
+        connection.receive_extended_clipboard = lambda data: self.fail('must not receive data')
+        msg_ClientCutText(connection, struct.pack('>3sl', b'\0\0\0', -4))
+        self.assertFalse(connection.closed)
         self.assertEqual([], connection.events)

@@ -5,7 +5,7 @@ import zlib
 from cairovnc import CairoVNCOptions, VNCConnection
 from cairovnc.constants import VNCConstants
 from cairovnc.pixeldata import PixelFormat
-from cairovnc.regions import RegionRequest
+from cairovnc.regions import RegionRequest, Regions
 
 
 class Server(object):
@@ -20,6 +20,8 @@ class Server(object):
 class Connection(object):
     update_framebuffer = getattr(VNCConnection.update_framebuffer, 'im_func', VNCConnection.update_framebuffer)
     set_capabilities = getattr(VNCConnection.set_capabilities, 'im_func', VNCConnection.set_capabilities)
+    queue_push_framebuffer_update = getattr(VNCConnection.queue_push_framebuffer_update,
+                                            'im_func', VNCConnection.queue_push_framebuffer_update)
 
 
 def connection(rows):
@@ -57,6 +59,50 @@ def rectangles(message):
 
 
 class ZlibEncodingTests(unittest.TestCase):
+    def test_apple_push_mode_queues_an_incremental_full_region(self):
+        client = connection([b'\0\0\0\0'])
+        client.width = 1
+        client.height = 1
+        client.request_regions = Regions()
+        client.set_capabilities([VNCConstants.PseudoEncoding_Apple1011])
+        self.assertTrue(client.options.push_requests)
+        client.queue_push_framebuffer_update()
+        self.assertTrue(client.request_regions.pop().incremental)
+
+    def test_incremental_initial_update_sends_all_rows(self):
+        client = connection([b'A\0\0\0', b'B\0\0\0', b'C\0\0\0'])
+        client.update_framebuffer(RegionRequest(True, 0, 0, 1, 3))
+        rectangle = rectangles(client.messages[0])[0]
+        self.assertEqual((0, 3), (rectangle[1], rectangle[3]))
+
+    def test_incremental_update_sends_only_changed_row_range(self):
+        rows = [b'A\0\0\0', b'B\0\0\0', b'C\0\0\0', b'D\0\0\0']
+        client = connection(rows)
+        client.update_framebuffer(RegionRequest(True, 0, 0, 1, 4))
+        rows[1] = b'X\0\0\0'
+        rows[2] = b'Y\0\0\0'
+        client.update_framebuffer(RegionRequest(True, 0, 0, 1, 4))
+        rectangle = rectangles(client.messages[1])[0]
+        self.assertEqual((1, 2), (rectangle[1], rectangle[3]))
+
+    def test_incremental_update_sends_separated_changed_ranges(self):
+        rows = [b'A\0\0\0', b'B\0\0\0', b'C\0\0\0', b'D\0\0\0']
+        client = connection(rows)
+        client.update_framebuffer(RegionRequest(True, 0, 0, 1, 4))
+        rows[0] = b'X\0\0\0'
+        rows[3] = b'Y\0\0\0'
+        client.update_framebuffer(RegionRequest(True, 0, 0, 1, 4))
+        self.assertEqual([(0, 1), (3, 1)],
+                         [(rectangle[1], rectangle[3])
+                          for rectangle in rectangles(client.messages[1])])
+
+    def test_explicit_nonincremental_request_still_sends_all_rows(self):
+        rows = [b'A\0\0\0', b'B\0\0\0', b'C\0\0\0']
+        client = connection(rows)
+        client.update_framebuffer(RegionRequest(True, 0, 0, 1, 3))
+        client.update_framebuffer(RegionRequest(False, 0, 0, 1, 3))
+        rectangle = rectangles(client.messages[1])[0]
+        self.assertEqual((0, 3), (rectangle[1], rectangle[3]))
     def test_zlib_is_selected_and_length_framed(self):
         client = connection([b'\x01\x02\x03\x00' * 4])
         client.set_capabilities([VNCConstants.Encoding_zlib])

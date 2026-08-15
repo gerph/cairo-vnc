@@ -2,7 +2,7 @@ import struct
 import unittest
 import zlib
 
-from cairovnc import CairoVNCOptions, CairoVNCServer, VNCConnection
+from cairovnc import CairoVNCOptions, CairoVNCServer, VNCConnection, VNCServer
 from cairovnc.clipboard import VNCClipboard
 from cairovnc.constants import VNCConstants
 
@@ -41,6 +41,15 @@ class Connection(object):
 
 
 class ClipboardTests(unittest.TestCase):
+    def test_vnc_server_normalises_clipboard(self):
+        clipboard = VNCClipboard({VNCClipboard.Format_Text: u'hello'})
+        server = VNCServer(('127.0.0.1', 0), object,
+                           options=CairoVNCOptions(), clipboard=clipboard)
+        try:
+            self.assertIs(clipboard, server.clipboard)
+        finally:
+            server.server_close()
+
     def test_server_cut_text_framing(self):
         connection = Connection(u'hello\xa3')
         connection.send_clipboard()
@@ -135,3 +144,55 @@ class ClipboardTests(unittest.TestCase):
         connection = Connection(u'\u20ac')
         connection.send_clipboard()
         self.assertEqual([], connection.messages)
+
+    def test_extended_clipboard_is_ignored_without_negotiation(self):
+        connection = Connection(None)
+        logs = []
+        connection.log = logs.append
+        connection.receive_extended_clipboard(struct.pack(
+            '>L', VNCClipboard.Format_Text | VNCConstants.Clipboard_Action_Notify))
+        self.assertEqual([], connection.events)
+        self.assertTrue(logs)
+
+    def test_extended_clipboard_ignores_unknown_formats(self):
+        connection = Connection(None)
+        connection.capabilities.add(VNCConstants.PseudoEncoding_ExtendedClipboard)
+        unknown = 1 << 3
+        text = b'hello\0'
+        data = (struct.pack('>L', len(text)) + text +
+                struct.pack('>L', 3) + b'xyz')
+        connection.receive_extended_clipboard(struct.pack(
+            '>L', unknown | VNCClipboard.Format_Text |
+            VNCConstants.Clipboard_Action_Provide) + zlib.compress(data))
+        self.assertEqual(u'hello', connection.events[0].clipboard.text)
+        self.assertNotIn(unknown, connection.events[0].clipboard.formats)
+
+    def test_invalid_extended_compression_is_rejected(self):
+        connection = Connection(None)
+        self.assertIsNone(connection.decompress_extended_clipboard(b'not zlib', 1024))
+        self.assertIsNone(connection.decompress_extended_clipboard(
+            zlib.compress(b'a' * 16), 8))
+        self.assertIsNone(connection.decompress_extended_clipboard(
+            zlib.compress(b'ok') + b'trailing', 1024))
+
+    def test_malformed_extended_provide_is_rejected(self):
+        connection = Connection(None)
+        connection.capabilities.add(VNCConstants.PseudoEncoding_ExtendedClipboard)
+        flags = VNCClipboard.Format_Text | VNCConstants.Clipboard_Action_Provide
+        connection.receive_extended_clipboard(struct.pack('>L', flags) +
+                                              zlib.compress(struct.pack('>L', 8) + b'x'))
+        self.assertEqual([], connection.events)
+        connection.options.clipboard_maximum_size = 4
+        connection.receive_extended_clipboard(struct.pack('>L', flags) +
+                                              zlib.compress(struct.pack('>L', 5) + b'hello'))
+        self.assertEqual([], connection.events)
+
+    def test_read_only_extended_provide_is_not_queued(self):
+        connection = Connection(None)
+        connection.options.read_only = True
+        connection.capabilities.add(VNCConstants.PseudoEncoding_ExtendedClipboard)
+        data = struct.pack('>L', 3) + b'ok\0'
+        connection.receive_extended_clipboard(struct.pack(
+            '>L', VNCClipboard.Format_Text | VNCConstants.Clipboard_Action_Provide) +
+                                              zlib.compress(data))
+        self.assertEqual([], connection.events)

@@ -615,10 +615,7 @@ class VNCConnection(socketserver.BaseRequestHandler):
                     # There is a changed frame request pending, and we have push requests enabled.
                     if not self.request_regions:
                         if time.time() - self.last_frameupdate_time >= self.min_frame_period:
-                            # Add a request for a full redraw
-                            self.request_regions.add(RegionRequest(incremental=False,
-                                                                   x=0, y=0,
-                                                                   width=self.width, height=self.height))
+                            self.queue_push_framebuffer_update()
                             self.changed_frame = False
                 else:
                     # They don't want push requests, so we can clear the flag
@@ -791,6 +788,14 @@ class VNCConnection(socketserver.BaseRequestHandler):
 
         msg = b''.join(msg_data)
         self.write(msg)
+
+    def queue_push_framebuffer_update(self):
+        """Queue a synthetic incremental request for Apple push mode."""
+        # An empty last_rows cache still makes the first pushed update complete.
+        # Subsequent pushes can therefore avoid encoding unchanged rows.
+        self.request_regions.add(RegionRequest(incremental=True,
+                                               x=0, y=0,
+                                               width=self.width, height=self.height))
 
     def set_capabilities(self, capabilities):
         """
@@ -1028,9 +1033,8 @@ class VNCServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         self.surface = kwargs.pop('surface', None)
         self.surface_lock = kwargs.pop('surface_lock', None) or NullLock()
         self.cursor = kwargs.pop('cursor', None)
-        self.clipboard = kwargs.pop('clipboard', None)
-        if self.clipboard is not None:
-            self.clipboard.encode('iso-8859-1')
+        clipboard = kwargs.pop('clipboard', None)
+        self.clipboard = clipboard_value(clipboard) if clipboard is not None else None
         self.surface_data_lock = threading.Lock()
 
         self.event_queue = queue.Queue(self.options.event_queue_length)
