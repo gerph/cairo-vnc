@@ -69,6 +69,27 @@ class ClipboardTests(unittest.TestCase):
                          flags & 0xffff)
         self.assertEqual(b'\0' * 12, zlib.decompress(message[12:]))
 
+    def test_extended_capabilities_are_received_with_limits(self):
+        connection = Connection(None)
+        formats = VNCClipboard.Format_Text | VNCClipboard.Format_HTML
+        limits = struct.pack('>LL', 1024, 2048)
+        connection.receive_extended_clipboard_capabilities(formats, zlib.compress(limits))
+        self.assertEqual(formats, connection.extended_clipboard_capabilities)
+        self.assertEqual({VNCClipboard.Format_Text: 1024,
+                          VNCClipboard.Format_HTML: 2048},
+                         connection.extended_clipboard_limits)
+
+    def test_malformed_extended_capabilities_are_rejected(self):
+        connection = Connection(None)
+        logs = []
+        connection.log = logs.append
+        formats = VNCClipboard.Format_Text | VNCClipboard.Format_RTF
+        connection.receive_extended_clipboard_capabilities(
+            formats, zlib.compress(struct.pack('>L', 1024)))
+        self.assertIsNone(connection.extended_clipboard_capabilities)
+        self.assertEqual({}, connection.extended_clipboard_limits)
+        self.assertTrue(logs)
+
     def test_extended_provide_contains_utf8_text_rtf_and_html(self):
         connection = Connection(u'hello\n\xa3')
         connection.server.clipboard.set(VNCClipboard.Format_RTF, b'{\\rtf1}')
