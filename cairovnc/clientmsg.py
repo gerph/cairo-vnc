@@ -7,7 +7,8 @@ import time
 
 from .constants import VNCConstants
 from .regions import RegionRequest
-from .events import VNCEventMove, VNCEventClick, VNCEventKey, VNCEventScroll
+from .events import VNCEventMove, VNCEventClick, VNCEventKey, VNCEventScroll, VNCEventClipboard
+from .clipboard import VNCClipboard
 
 
 message_handlers = {}
@@ -123,7 +124,25 @@ def msg_PointerEvent(connection, payload):
 
 @register_msg(VNCConstants.ClientMsgType_ClientCutText, payload_size=3 + 4)
 def msg_ClientCutText(connection, payload):
-    (_, textlen) = struct.unpack('>3sL', payload)
+    (_, textlen) = struct.unpack('>3sl', payload)
+    if textlen < 0:
+        textlen = -textlen
+        maximum = connection.options.clipboard_maximum_size * 3 + 64
+        if textlen > maximum:
+            connection.log("ClientCutText: extended payload is too large")
+            connection.disconnect()
+            return
+        response = connection.read(textlen, timeout=connection.payload_timeout)
+        if not response:
+            connection.log("Timeout reading ClientCutText data (extended)")
+            return
+        connection.receive_extended_clipboard(response)
+        return
+
+    if textlen > connection.options.clipboard_maximum_size:
+        connection.log("ClientCutText: payload is too large")
+        connection.disconnect()
+        return
     response = connection.read(textlen, timeout=connection.payload_timeout)
     if not response:
         connection.log("Timeout reading ClientCutText data (2)")
@@ -131,4 +150,5 @@ def msg_ClientCutText(connection, payload):
     if not connection.options.read_only:
         text = response.decode('iso-8859-1')
         connection.log("ClientCutText: textlen=%i, text=%r" % (textlen, text))
-        # FIXME: Deliver this data
+        connection.queue_event(VNCEventClipboard(
+            VNCClipboard({VNCClipboard.Format_Text: text})))

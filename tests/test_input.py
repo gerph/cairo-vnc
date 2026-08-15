@@ -1,12 +1,13 @@
 import struct
 import unittest
 
-from cairovnc.clientmsg import msg_PointerEvent
-from cairovnc.events import VNCEventClick, VNCEventMove, VNCEventScroll
+from cairovnc.clientmsg import msg_ClientCutText, msg_PointerEvent
+from cairovnc.events import VNCEventClick, VNCEventClipboard, VNCEventMove, VNCEventScroll
 
 
 class Options(object):
     read_only = False
+    clipboard_maximum_size = 20 * 1024 * 1024
 
 
 class Connection(object):
@@ -18,12 +19,21 @@ class Connection(object):
         self.pointer_xpos = -1
         self.pointer_ypos = -1
         self.events = []
+        self.payload_timeout = 1
+        self.clipboard_data = None
+        self.closed = False
 
     def log(self, message):
         pass
 
     def queue_event(self, event):
         self.events.append(event)
+
+    def disconnect(self):
+        self.closed = True
+
+    def read(self, size, timeout):
+        return self.clipboard_data
 
 
 def pointer(buttons, x=10, y=20):
@@ -81,3 +91,47 @@ class PointerEventTests(unittest.TestCase):
         self.assertEqual([(0, True), (0, False)],
                          [(event.button, event.down) for event in clicks])
         self.assertEqual(0, connection.pointer_buttons)
+
+    def test_client_clipboard_is_queued_as_text(self):
+        connection = Connection()
+        connection.clipboard_data = b'hello\xa3'
+        msg_ClientCutText(connection, struct.pack('>3sL', b'\0\0\0',
+                                                   len(connection.clipboard_data)))
+        self.assertEqual(1, len(connection.events))
+        self.assertIsInstance(connection.events[0], VNCEventClipboard)
+        self.assertEqual(u'hello\xa3', connection.events[0].text)
+
+    def test_read_only_suppresses_client_clipboard(self):
+        connection = Connection(True)
+        connection.clipboard_data = b'private'
+        msg_ClientCutText(connection, struct.pack('>3sL', b'\0\0\0',
+                                                   len(connection.clipboard_data)))
+        self.assertEqual([], connection.events)
+
+    def test_extended_client_clipboard_is_routed(self):
+        connection = Connection()
+        connection.clipboard_data = b'\x01\0\0\0hello'
+        received = []
+        connection.receive_extended_clipboard = received.append
+        msg_ClientCutText(connection, struct.pack('>3sl', b'\0\0\0',
+                                                   -len(connection.clipboard_data)))
+        self.assertEqual([connection.clipboard_data], received)
+        self.assertEqual([], connection.events)
+
+    def test_oversized_client_clipboard_disconnects(self):
+        connection = Connection()
+        connection.options.clipboard_maximum_size = 10
+        msg_ClientCutText(connection, struct.pack('>3sl', b'\0\0\0', -95))
+        self.assertTrue(connection.closed)
+        connection = Connection()
+        connection.options.clipboard_maximum_size = 10
+        msg_ClientCutText(connection, struct.pack('>3sl', b'\0\0\0', 11))
+        self.assertTrue(connection.closed)
+
+    def test_extended_client_clipboard_timeout_is_ignored(self):
+        connection = Connection()
+        connection.clipboard_data = None
+        connection.receive_extended_clipboard = lambda data: self.fail('must not receive data')
+        msg_ClientCutText(connection, struct.pack('>3sl', b'\0\0\0', -4))
+        self.assertFalse(connection.closed)
+        self.assertEqual([], connection.events)

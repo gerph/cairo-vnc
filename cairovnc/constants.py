@@ -113,6 +113,12 @@ class VNCConstants(object):
     PseudoEncoding_VMwareVirtualMachineState = 0x574d566a
     PseudoEncoding_ExtendedClipboard = -1063131698
 
+    Clipboard_Action_Caps = 1 << 24
+    Clipboard_Action_Request = 1 << 25
+    Clipboard_Action_Peek = 1 << 26
+    Clipboard_Action_Notify = 1 << 27
+    Clipboard_Action_Provide = 1 << 28
+
     encoding_names = {}
 
 
