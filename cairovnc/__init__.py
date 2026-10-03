@@ -848,10 +848,14 @@ class VNCConnection(socketserver.BaseRequestHandler):
                    VNCConstants.Clipboard_Action_Notify |
                    VNCConstants.Clipboard_Action_Provide)
         # Zero unsolicited sizes require an explicit notify/request exchange.
+        # The sizes in a caps message are sent as plain 32-bit values; only
+        # the 'provide' action's data is zlib compressed. Clients such as
+        # noVNC read them uncompressed, and compressing them leaves unread
+        # bytes that corrupt the next message.
         sizes = struct.pack('>LLL', 0, 0, 0)
         self.send_extended_clipboard_message(formats | actions |
                                              VNCConstants.Clipboard_Action_Caps,
-                                             zlib.compress(sizes))
+                                             sizes)
 
     def send_extended_clipboard_action(self, action, formats):
         self.send_extended_clipboard_message(action | formats)
@@ -901,8 +905,9 @@ class VNCConnection(socketserver.BaseRequestHandler):
 
     def receive_extended_clipboard_capabilities(self, formats, data):
         expected = 4 * sum(1 for bit in range(16) if formats & (1 << bit))
-        decoded = self.decompress_extended_clipboard(data, expected)
-        if decoded is None or len(decoded) != expected:
+        # The sizes are plain 32-bit values, not compressed.
+        decoded = data
+        if len(decoded) != expected:
             self.log("ClientCutText: invalid extended clipboard capabilities")
             return
         self.extended_clipboard_capabilities = formats

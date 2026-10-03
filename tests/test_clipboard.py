@@ -67,13 +67,15 @@ class ClipboardTests(unittest.TestCase):
         self.assertTrue(flags & VNCConstants.Clipboard_Action_Caps)
         self.assertEqual(VNCClipboard.Format_Text | VNCClipboard.Format_RTF | VNCClipboard.Format_HTML,
                          flags & 0xffff)
-        self.assertEqual(b'\0' * 12, zlib.decompress(message[12:]))
+        self.assertEqual(b'\0' * 12, message[12:])
+        # The whole message is the flags and the three plain sizes.
+        self.assertEqual(-16, length)
 
     def test_extended_capabilities_are_received_with_limits(self):
         connection = Connection(None)
         formats = VNCClipboard.Format_Text | VNCClipboard.Format_HTML
         limits = struct.pack('>LL', 1024, 2048)
-        connection.receive_extended_clipboard_capabilities(formats, zlib.compress(limits))
+        connection.receive_extended_clipboard_capabilities(formats, limits)
         self.assertEqual(formats, connection.extended_clipboard_capabilities)
         self.assertEqual({VNCClipboard.Format_Text: 1024,
                           VNCClipboard.Format_HTML: 2048},
@@ -85,7 +87,7 @@ class ClipboardTests(unittest.TestCase):
         connection.log = logs.append
         formats = VNCClipboard.Format_Text | VNCClipboard.Format_RTF
         connection.receive_extended_clipboard_capabilities(
-            formats, zlib.compress(struct.pack('>L', 1024)))
+            formats, struct.pack('>L', 1024))
         self.assertIsNone(connection.extended_clipboard_capabilities)
         self.assertEqual({}, connection.extended_clipboard_limits)
         self.assertTrue(logs)
